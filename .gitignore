@@ -10,3 +10,4 @@ known_hosts
 *.key
 *.zip
 REVISION
+/settings.json

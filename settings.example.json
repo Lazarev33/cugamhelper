@@ -1,0 +1,15 @@
+{
+  "barcode_cooldown": 2,
+  "clean_cooldown": 5,
+  "warning_interval": 15,
+  "chat_interval": 1.1,
+  "global_rate": 20,
+  "max_input_chars": 16384,
+  "max_input_lines": 1500,
+  "parallel_operations": 8,
+  "queue_size": 32,
+  "retry_attempts": 2,
+  "send_timeout": 15,
+  "barcode_mode": "photo",
+  "allowed_user_ids": null
+}

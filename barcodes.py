@@ -16,8 +16,8 @@ BARCODE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,47}")
 
 def render_png(value: str) -> bytes:
     image = BytesIO()
-    # 254 dpi: модуль 0,4 мм занимает 4 пикселя, белое поле — 20 модулей.
-    Code128(value, writer=ImageWriter(dpi=254)).write(image, {
+    # 508 dpi: модуль 0,4 мм занимает 8 пикселей, белое поле — 20 модулей.
+    Code128(value, writer=ImageWriter(dpi=508)).write(image, {
         "module_width": 0.4,
         "module_height": 24,
         "quiet_zone": 8,
@@ -37,6 +37,6 @@ def load_catalog(local: Path = LOCAL_CATALOG) -> dict[str, bytes]:
         if not isinstance(value, str) or not BARCODE_VALUE.fullmatch(value):
             raise ValueError(f"{path}: недопустимое значение штрихкода")
         if value in catalog:
-            raise ValueError(f"{path}: повторяющийся код {value}")
+            raise ValueError(f"{path}: повторяющийся код")
         catalog[value] = render_png(value)
     return catalog

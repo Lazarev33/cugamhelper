@@ -6,9 +6,13 @@ branding.py
 cli.py
 deployment.py
 parser.py
+protection.py
+settings.py
+settings.example.json
 requirements.txt
 test_bot.py
 test_cli.py
 test_deployment.py
 test_parser.py
+test_protection.py
 tg-number-cleaner.service
