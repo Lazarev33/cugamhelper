@@ -11,3 +11,5 @@ known_hosts
 *.zip
 REVISION
 /settings.json
+/.state/
+*.sqlite3*

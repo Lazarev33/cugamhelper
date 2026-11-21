@@ -12,21 +12,24 @@ from aiogram.exceptions import (
 )
 from aiogram.enums import ChatType
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
 from aiogram.methods import GetUpdates
 from aiogram.types import (
-    BotCommand, BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, Message, Update,
+    BotCommand, CallbackQuery, ErrorEvent, InlineKeyboardButton, Message, Update,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-from barcodes import load_catalog
+from admin import number, register as register_workflows, send_png
+from catalog import Catalog, CatalogError
+from dialogs import DialogStorage
 from branding import BOT_NAME
 from parser import clean_numbers, chunks
 from protection import Protection, UserState
 from settings import load_settings
 
 
-dp = Dispatcher(disable_fsm=True)
+dp = Dispatcher(storage=DialogStorage())
 MAIN_TEXT = f"Я — {BOT_NAME}. Выбери действие."
 CLEAN_TEXT = (
     "Отправь список в этом чате, по одной строке на номер. Пример:\n\n"
@@ -39,6 +42,7 @@ HELP_TEXT = (
     "ШК — выбери складской код и открой изображение для сканирования.\n"
     "Очистка номеров — отправь список номеров с датами или без дат. "
     "Исправь указанные строки, если бот сообщит об ошибках.\n\n"
+    "/scan — прочитать штрихкод с фото. /cancel — отменить текущий диалог.\n"
     "/menu — главное меню."
 )
 
@@ -47,16 +51,23 @@ def menu_keys() -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="ШК", callback_data="menu:barcodes")
     keyboard.button(text="Очистка номеров", callback_data="menu:clean")
+    keyboard.button(text="Сканировать ШК", callback_data="scan:start")
     keyboard.button(text="Помощь", callback_data="menu:help")
     keyboard.adjust(1)
     return keyboard
 
 
-def section_keys(codes=()) -> InlineKeyboardBuilder:
+def section_keys(repo: Catalog | None = None, page: int = 0) -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
-    for code in codes:
-        keyboard.button(text=code, callback_data=f"barcode:{code}")
-    keyboard.adjust(2)
+    if repo is not None:
+        records, more = repo.page(page, active=True)
+        for record in records:
+            keyboard.button(text=record.name, callback_data=f"code:{record.id}:{page}")
+        keyboard.adjust(2)
+        if page:
+            keyboard.button(text="‹", callback_data=f"catalog:{page-1}")
+        if more:
+            keyboard.button(text="›", callback_data=f"catalog:{page+1}")
     keyboard.row(
         InlineKeyboardButton(text="Назад", callback_data="menu:back"),
         InlineKeyboardButton(text="Главное меню", callback_data="menu:main"),
@@ -95,35 +106,41 @@ def queue_menu(message: Message, guard: Protection, title: str, keyboard: Inline
 
 @dp.message(CommandStart())
 @dp.message(Command("menu"))
-async def start(message: Message, guard: Protection) -> None:
+async def start(message: Message, guard: Protection, state: FSMContext) -> None:
+    await state.clear()
     queue_menu(message, guard, MAIN_TEXT, menu_keys())
 
 
 @dp.message(Command("help"))
-async def help_command(message: Message, guard: Protection) -> None:
+async def help_command(message: Message, guard: Protection, state: FSMContext) -> None:
+    await state.clear()
     queue_menu(message, guard, HELP_TEXT, section_keys())
 
 
 @dp.callback_query(F.data.in_({
     "menu:barcodes", "menu:clean", "menu:help", "menu:main", "menu:back",
-}))
-async def navigate(query: CallbackQuery, catalog: dict[str, bytes], guard: Protection) -> None:
+}) | F.data.startswith("catalog:"))
+async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state: FSMContext) -> None:
     message = query.message
     uid = query.from_user.id
-    state = guard.state(uid)
+    runtime = guard.state(uid)
     if not isinstance(message, Message):
-        text = "Меню устарело. Открой /menu." if state and guard.warning(state, "stale", 2) else None
+        text = "Меню устарело. Открой /menu." if runtime and guard.warning(runtime, "stale", 2) else None
         await query.answer(text, show_alert=False)
         return
     await query.answer()
-    if state is None:
+    if runtime is None:
         return
+    await state.clear()
     screen = "menu:main" if query.data == "menu:back" else query.data
-    if state.screens.get(message.message_id) == screen:
-        return
 
-    if screen == "menu:barcodes":
-        title, keyboard = "Выбери штрихкод", section_keys(catalog)
+    if screen == "menu:barcodes" or screen.startswith("catalog:"):
+        try:
+            page = number(screen.partition(":")[2], 1_000_000) if screen.startswith("catalog:") else 0
+        except CatalogError:
+            return
+        title = "Выбери штрихкод" if page == 0 else f"Выбери штрихкод · страница {page+1}"
+        keyboard = section_keys(repo, page)
     elif screen == "menu:clean":
         title, keyboard = CLEAN_TEXT, section_keys()
     elif screen == "menu:help":
@@ -131,13 +148,15 @@ async def navigate(query: CallbackQuery, catalog: dict[str, bytes], guard: Prote
     else:
         title, keyboard = MAIN_TEXT, menu_keys()
     markup = keyboard.as_markup()
-    # Пока бот не менял это сообщение, доверяем состоянию из callback Telegram.
-    if message.message_id not in state.screens and message.text == title and message.reply_markup == markup:
+    screen_key = (title, markup.model_dump_json())
+    if runtime.screens.get(message.message_id) == screen_key:
+        return
+    if message.message_id not in runtime.screens and message.text == title and message.reply_markup == markup:
         return
 
     async def show():
         await message.answer(title, reply_markup=markup)
-        remember_screen(state, message.message_id, screen)
+        remember_screen(runtime, message.message_id, screen_key)
 
     async def edit():
         try:
@@ -153,7 +172,7 @@ async def navigate(query: CallbackQuery, catalog: dict[str, bytes], guard: Prote
                         guard.light.submit(uid, show)
                     return
                 raise
-        remember_screen(state, message.message_id, screen)
+        remember_screen(runtime, message.message_id, screen_key)
 
     if message.text is None:
         if not guard.busy(uid):
@@ -162,23 +181,32 @@ async def navigate(query: CallbackQuery, catalog: dict[str, bytes], guard: Prote
         guard.edits.submit(uid, edit)
 
 
-def remember_screen(state: UserState, message_id: int, screen: str) -> None:
+def remember_screen(state: UserState, message_id: int, screen: tuple[str, str]) -> None:
     state.screens[message_id] = screen
     state.screens.move_to_end(message_id)
     if len(state.screens) > 8:
         state.screens.popitem(last=False)
 
 
-@dp.callback_query(F.data.startswith("barcode:"))
-async def send_barcode(query: CallbackQuery, catalog: dict[str, bytes], guard: Protection) -> None:
+@dp.callback_query(F.data.startswith(("barcode:", "code:")))
+async def send_barcode(query: CallbackQuery, repo: Catalog, guard: Protection) -> None:
     uid = query.from_user.id
     state = guard.state(uid)
     if state is None:
         await query.answer()
         return
-    code = query.data.removeprefix("barcode:")
-    image = catalog.get(code)
-    if image is None or not isinstance(query.message, Message):
+    page = 0
+    try:
+        if query.data.startswith("code:"):
+            _, record_id, page_id = query.data.split(":")
+            record = repo.get(number(record_id))
+            page = number(page_id, 1_000_000)
+        else:
+            # Старые кнопки v2.3.0 работали со значением вместо внутреннего ID.
+            record = repo.by_value(query.data.removeprefix("barcode:"))
+    except ValueError:
+        record = None
+    if record is None or not record.active or not isinstance(query.message, Message):
         text = "Код недоступен. Открой /menu." if guard.warning(state, "stale", 2) else None
         await query.answer(text, show_alert=False)
         return
@@ -200,11 +228,11 @@ async def send_barcode(query: CallbackQuery, catalog: dict[str, bytes], guard: P
 
     async def deliver():
         await acknowledged.wait()
-        answer = message.answer_photo if guard.settings.barcode_mode == "photo" else message.answer_document
-        await answer(
-            BufferedInputFile(image, filename=f"{code}.png"), caption=code, parse_mode=None,
-            reply_markup=section_keys(catalog).as_markup(),
-        )
+        current = repo.get(record.id)
+        if current and current.active:
+            await send_png(message, current.name, current.value, guard, section_keys(repo, page).as_markup())
+        else:
+            await message.answer("ШК больше недоступен. Открой каталог заново.")
 
     if not guard.heavy.submit(uid, deliver):
         guard.note("очередь тяжёлых операций заполнена")
@@ -216,6 +244,9 @@ async def send_barcode(query: CallbackQuery, catalog: dict[str, bytes], guard: P
         await query.answer()
     finally:
         acknowledged.set()
+
+
+register_workflows(dp)
 
 
 @dp.callback_query()
@@ -311,8 +342,9 @@ async def main() -> None:
     if not token:
         raise SystemExit("Не задан BOT_TOKEN. На VPS используй sudo numberbot token.")
     try:
-        catalog = load_catalog()
         settings = load_settings()
+        location = Path(os.getenv("STATE_DIRECTORY") or Path(__file__).with_name(".state"))
+        repo = Catalog(location / "catalog.sqlite3", settings.owner_telegram_id)
     except (OSError, ValueError) as error:
         raise SystemExit(f"Ошибка конфигурации бота: {error}") from None
 
@@ -347,6 +379,7 @@ async def main() -> None:
                 BotCommand(command="start", description="Запустить бота"),
                 BotCommand(command="menu", description="Главное меню"),
                 BotCommand(command="help", description="Помощь"),
+                BotCommand(command="scan", description="Сканировать штрихкод"),
             ], request_timeout=5)
         except TelegramAPIError as error:
             logging.warning("Не удалось задать команды бота: %s", type(error).__name__)
@@ -354,11 +387,12 @@ async def main() -> None:
         bot.session.middleware.register(guard.outgoing)
         try:
             await dp.start_polling(
-                bot, catalog=catalog, guard=guard, close_bot_session=False,
+                bot, repo=repo, guard=guard, close_bot_session=False,
                 tasks_concurrency_limit=32, allowed_updates=["message", "callback_query"],
             )
         finally:
             await guard.close()
+            repo.close()
 
 
 if __name__ == "__main__":

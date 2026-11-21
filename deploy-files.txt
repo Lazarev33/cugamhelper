@@ -1,6 +1,10 @@
 VERSION
 barcodes.json
 barcodes.py
+admin.py
+catalog.py
+dialogs.py
+scanner.py
 bot.py
 branding.py
 cli.py
@@ -11,6 +15,7 @@ settings.py
 settings.example.json
 requirements.txt
 test_bot.py
+test_catalog.py
 test_cli.py
 test_deployment.py
 test_parser.py

@@ -39,6 +39,7 @@ class Settings:
     send_timeout: float = 15
     barcode_mode: str = "photo"
     allowed_user_ids: frozenset[int] | None = None
+    owner_telegram_id: int | None = None
 
 
 def load_settings(path: Path = SETTINGS_PATH) -> Settings:
@@ -66,6 +67,9 @@ def load_settings(path: Path = SETTINGS_PATH) -> Settings:
             raise ValueError(f"поле {name} должно быть числом от {lower} до {upper} нужного типа")
     if values.get("barcode_mode", defaults.barcode_mode) not in ("photo", "document"):
         raise ValueError("поле barcode_mode принимает photo или document")
+    owner = values.get("owner_telegram_id")
+    if owner is not None and (type(owner) is not int or not 0 < owner < 2**52):
+        raise ValueError("owner_telegram_id — положительный Telegram user ID или null")
     allowed = values.get("allowed_user_ids")
     if allowed is not None:
         if not isinstance(allowed, list) or any(

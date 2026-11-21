@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import unittest
 
@@ -12,7 +13,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendDocument, SendMessage, SendPhoto
 from aiogram.types import BufferedInputFile, Message, Update
 
-from barcodes import load_catalog
+from barcodes import load_seed_values, render_png
+from catalog import Catalog
 from bot import dp
 from protection import Protection
 from settings import Settings
@@ -50,12 +52,18 @@ class TelegramStub(AiohttpSession):
         }, context={"bot": bot})
 
 
-class BotTests(unittest.IsolatedAsyncioTestCase):
+class TelegramCase(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.catalog = load_catalog(Path(__file__).with_name("no-test-catalog.json"))
+        cls.values = load_seed_values(Path(__file__).with_name("no-test-catalog.json"))
+        cls.catalog = {code: render_png(code) for code in cls.values}
 
     async def asyncSetUp(self):
+        await dp.storage.close()
+        work = TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        self.repo = Catalog(Path(work.name) / "catalog.sqlite3", owner=42, seed=lambda: self.values)
+        self.addCleanup(self.repo.close)
         self.session = TelegramStub()
         self.bot = Bot(token="123456:unit_test_token", session=self.session)
         self.addAsyncCleanup(self.bot.session.close)
@@ -80,7 +88,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.update_id += 1
         await dp.feed_update(
             self.bot, Update.model_validate({"update_id": self.update_id, **payload}),
-            catalog=self.catalog, guard=self.guard,
+            repo=self.repo, guard=self.guard,
         )
         if settle:
             await self.settle()
@@ -109,6 +117,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         fields = {params["name"] for params, _, _ in form._fields}
         self.assertTrue({"parse_mode", "entities", "reply_markup"}.isdisjoint(fields))
 
+
+class BotTests(TelegramCase):
     async def test_exact_copy_of_100_ids(self):
         ids = ["00000001", "12345678", "00000001", "00001234"] * 25
         await self.send("\n".join(f"{value}-03.11.2026" for value in ids))
@@ -153,7 +163,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             request = self.session.requests[-1]
             self.assertIn("Помощник 2 смены", request.text)
             self.assertEqual([button.text for row in request.reply_markup.inline_keyboard for button in row],
-                             ["ШК", "Очистка номеров", "Помощь"])
+                             ["ШК", "Очистка номеров", "Сканировать ШК", "Помощь"])
             self.clock.now += 1.1
         await self.click("menu:barcodes")
         menu = self.session.requests[-1]

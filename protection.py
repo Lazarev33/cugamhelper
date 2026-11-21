@@ -176,6 +176,7 @@ class Protection:
         self.edits = Jobs(8, 0)
         self.users = OrderedDict()
         self.updates = OrderedDict()
+        self.scans: set[int] = set()
         self.log_after = {}
 
     def note(self, reason: str) -> None:

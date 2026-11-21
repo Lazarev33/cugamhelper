@@ -11,5 +11,6 @@
   "retry_attempts": 2,
   "send_timeout": 15,
   "barcode_mode": "photo",
-  "allowed_user_ids": null
+  "allowed_user_ids": null,
+  "owner_telegram_id": null
 }
