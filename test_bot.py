@@ -163,17 +163,34 @@ class BotTests(TelegramCase):
             request = self.session.requests[-1]
             self.assertIn("Помощник 2 смены", request.text)
             self.assertEqual([button.text for row in request.reply_markup.inline_keyboard for button in row],
-                             ["ШК", "Очистка номеров", "Сканировать ШК", "Помощь"])
+                             ["ШК", "Сканировать ШК", "Очистка номеров", "Админ-панель", "Помощь"])
             self.clock.now += 1.1
         await self.click("menu:barcodes")
         menu = self.session.requests[-1]
         keyboard = [button for row in menu.reply_markup.inline_keyboard for button in row]
-        self.assertEqual([button.text for button in keyboard], [*self.catalog, "Назад", "Главное меню"])
+        self.assertEqual([button.text for button in keyboard], [*self.catalog, "Главное меню"])
         await self.click("menu:barcodes")
         self.assertIsInstance(self.session.requests[-1], AnswerCallbackQuery)
         for key in ("menu:back", "menu:clean", "menu:help", "menu:main"):
             await self.click(key)
             self.assertIsInstance(self.session.requests[-1], EditMessageText)
+
+    async def test_role_menu_and_catalog_pages(self):
+        for uid, admin in [(43, False), (42, True), (44, True)]:
+            if uid == 44:
+                self.repo.set_admin(42, 44, True)
+            await self.send("/menu", uid=uid)
+            rows = self.session.requests[-1].reply_markup.inline_keyboard
+            self.assertEqual([b.text for b in rows[0]], ["ШК", "Сканировать ШК"])
+            self.assertEqual(any(b.text == "Админ-панель" for row in rows for b in row), admin)
+        self.repo.save(42, "Длинное название зоны приёмки", "EXTRA")
+        await self.click("catalog:1")
+        screen = self.session.requests[-1]
+        self.assertIn("страница 2", screen.text)
+        self.assertEqual([b.text for b in screen.reply_markup.inline_keyboard[0]], ["Длинное название зоны приёмки"])
+        await self.send("/myid", uid=45)
+        self.assertIn("45", self.session.requests[-1].text)
+        self.assertFalse(self.repo.is_admin(45))
 
     async def test_each_code_uses_photo_by_default(self):
         for code in self.catalog:

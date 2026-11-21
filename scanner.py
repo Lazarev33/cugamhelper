@@ -68,6 +68,12 @@ def decode_image(data: bytes) -> list[Decoded]:
         width, height = gray.size
         center = gray.crop((width // 20, height // 20, width * 19 // 20, height * 19 // 20))
         find(ImageOps.expand(center, border=40, fill=255))
+    if not found:
+        # Мелкие полосы на фото экрана: один увеличенный центральный фрагмент.
+        width, height = gray.size
+        region = gray.crop((int(width*.075), int(height*.075), int(width*.925), int(height*.925)))
+        if region.width * region.height * 4 <= MAX_PIXELS and min(region.size) >= 2:
+            find(region.resize((region.width * 2, region.height * 2), Image.Resampling.BICUBIC))
     return list(found.values())
 
 

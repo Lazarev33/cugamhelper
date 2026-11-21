@@ -88,8 +88,8 @@ class DeploymentTests(unittest.TestCase):
         self.assert_token_untouched()
 
     def test_missing_deploy_key_and_unchanged_revision(self):
-        with self.assertRaisesRegex(deployment.DeploymentError, "deploy key"):
-            deployment.git_environment()
+        self.assertEqual(deployment.git_environment()["GIT_ALLOW_PROTOCOL"], "https")
+        self.assertTrue(deployment.REMOTE.startswith("https://github.com/"))
         installed = self.candidate("release-installed", b"unit")
         revision = "a" * 40
         (installed / "REVISION").write_text(revision, encoding="ascii")

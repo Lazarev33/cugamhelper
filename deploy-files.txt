@@ -21,3 +21,5 @@ test_deployment.py
 test_parser.py
 test_protection.py
 tg-number-cleaner.service
+deploy-files.txt
+test_v25.py

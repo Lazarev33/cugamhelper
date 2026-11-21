@@ -1,6 +1,7 @@
 """Telegram-диалоги каталога, управления ролями и сканирования."""
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import replace
 import re
 from secrets import token_hex
@@ -8,7 +9,7 @@ import sqlite3
 
 from aiohttp import ClientError
 from aiogram import F
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -22,7 +23,7 @@ PANEL = "Админ-панель"
 CANCEL = ("Отмена", "flow:cancel")
 CODE_UNSUPPORTED = "Сохранить можно обычный Code 128 с допустимым значением."
 SCAN_PROMPT = "Пришли фото штрихкода или изображение JPEG, PNG или WebP."
-SCAN_FAILED = "Штрихкод не прочитан. Сделай фото чётче, улучши освещение или приблизь код и повтори."
+SCAN_FAILED = "Штрихкод не прочитан. Приблизь код, избегай бликов и пришли фото ещё раз или отправь оригинал как файл."
 NUMBER = re.compile(r"[0-9]{1,18}")
 
 
@@ -60,7 +61,20 @@ def number(value: str, maximum=2**63 - 1) -> int:
     return int(value)
 
 
+edit_target = ContextVar("edit_target", default=None)
+
+
 async def tell(message, text, markup=None):
+    if edit_target.get() is message and message.text:
+        edit_target.set(None)
+        try:
+            return await message.edit_text(text, parse_mode=None, reply_markup=markup)
+        except TelegramBadRequest as error:
+            reason = error.message.lower()
+            if "message is not modified" in reason:
+                return
+            if not any(key in reason for key in ("edit not found", "can't be edited", "can not be edited")):
+                raise
     return await message.answer(text, parse_mode=None, reply_markup=markup)
 
 
@@ -79,10 +93,13 @@ async def set_flow(state, stage, kind, **data):
 
 
 async def panel(message):
-    await tell(message, PANEL, keys(
+    markup = keys(
         ("Каталог ШК", "ad:list:0"), ("Добавить вручную", "ad:manual"), ("Добавить по фото", "ad:scan"),
-        ("Администраторы", "ad:roles:0"), ("Журнал изменений", "ad:log"), ("Закрыть", "menu:main"),
-    ))
+        ("Администраторы", "ad:roles:0"), ("Журнал изменений", "ad:log"), ("Главное меню", "menu:main"),
+    )
+    rows = markup.inline_keyboard
+    rows[1:3] = [rows[1] + rows[2]]
+    await tell(message, PANEL, markup)
 
 
 async def card(message, record: Barcode):
@@ -216,6 +233,9 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
         if index >= len(data["codes"]):
             raise CatalogError("Выбери код из списка.")
         await show_detected(message, state, repo, uid, kind, data["codes"][index])
+    elif action == "add" and stage == Flow.photo.state and kind == "scan" and "decoded" in data:
+        repo.require_admin(uid)
+        await show_detected(message, state, repo, uid, "add_photo", data["decoded"])
     elif action == "change" and stage == Flow.confirm.state and kind == "save" and len(args) == 1:
         origin = data["origin"]
         old = data["old"]
@@ -262,13 +282,17 @@ async def show_detected(message, state, repo, uid, kind, code):
             await tell(message, f"Формат: {code.format}\nЗначение: {code.value}\nВведи название кнопки.", keys(CANCEL))
             return
 
-    await set_flow(state, Flow.photo, kind)
+    await set_flow(state, Flow.photo, kind, decoded=code)
+    buttons = [CANCEL]
+    if kind == "scan" and code.addable and repo.is_admin(uid):
+        nonce = (await state.get_data())["nonce"]
+        buttons.insert(0, ("Добавить в каталог", f"flow:add:{nonce}"))
     value = "".join(char if char.isprintable() or char in "\n\t" else f"\\u{ord(char):04x}" for char in code.value)
     text = f"Формат: {code.format}\nЗначение:\n{value}"
     if kind == "add_photo":
         text += "\n" + CODE_UNSUPPORTED
     for offset in range(0, len(text), 1800):
-        await tell(message, text[offset:offset+1800], keys(CANCEL) if offset + 1800 >= len(text) else None)
+        await tell(message, text[offset:offset+1800], keys(*buttons) if offset + 1800 >= len(text) else None)
 
 
 async def form_text(message, state, guard, repo, uid, data, stage):
@@ -373,7 +397,17 @@ def register(dispatcher):
             else:
                 await apply_flow(message, state, guard, repo, uid, action, args)
 
-        if guard.light.submit(uid, lambda: safe(message, state, run)):
+        async def show_screen():
+            runtime = guard.state(uid)
+            if runtime is not None:
+                runtime.screens.pop(message.message_id, None)
+            token = edit_target.set(message)
+            try:
+                await safe(message, state, run)
+            finally:
+                edit_target.reset(token)
+
+        if guard.light.submit(uid, show_screen):
             try:
                 await query.answer()
             finally:

@@ -20,7 +20,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-from admin import number, register as register_workflows, send_png
+from admin import number, register as register_workflows, send_png, keys
 from catalog import Catalog, CatalogError
 from dialogs import DialogStorage
 from branding import BOT_NAME
@@ -47,13 +47,15 @@ HELP_TEXT = (
 )
 
 
-def menu_keys() -> InlineKeyboardBuilder:
+def menu_keys(admin=False) -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="ШК", callback_data="menu:barcodes")
-    keyboard.button(text="Очистка номеров", callback_data="menu:clean")
     keyboard.button(text="Сканировать ШК", callback_data="scan:start")
+    keyboard.button(text="Очистка номеров", callback_data="menu:clean")
+    if admin:
+        keyboard.button(text="Админ-панель", callback_data="ad:home")
     keyboard.button(text="Помощь", callback_data="menu:help")
-    keyboard.adjust(1)
+    keyboard.adjust(2, 1)
     return keyboard
 
 
@@ -61,17 +63,29 @@ def section_keys(repo: Catalog | None = None, page: int = 0) -> InlineKeyboardBu
     keyboard = InlineKeyboardBuilder()
     if repo is not None:
         records, more = repo.page(page, active=True)
+        row = []
         for record in records:
-            keyboard.button(text=record.name, callback_data=f"code:{record.id}:{page}")
-        keyboard.adjust(2)
+            button = InlineKeyboardButton(text=record.name, callback_data=f"code:{record.id}:{page}")
+            if len(record.name) > 14:
+                if row:
+                    keyboard.row(*row)
+                    row = []
+                keyboard.row(button)
+            else:
+                row.append(button)
+                if len(row) == 2:
+                    keyboard.row(*row)
+                    row = []
+        if row:
+            keyboard.row(*row)
+        arrows = []
         if page:
-            keyboard.button(text="‹", callback_data=f"catalog:{page-1}")
+            arrows.append(InlineKeyboardButton(text="‹ Ранее", callback_data=f"catalog:{page-1}"))
         if more:
-            keyboard.button(text="›", callback_data=f"catalog:{page+1}")
-    keyboard.row(
-        InlineKeyboardButton(text="Назад", callback_data="menu:back"),
-        InlineKeyboardButton(text="Главное меню", callback_data="menu:main"),
-    )
+            arrows.append(InlineKeyboardButton(text="Далее ›", callback_data=f"catalog:{page+1}"))
+        if arrows:
+            keyboard.row(*arrows)
+    keyboard.row(InlineKeyboardButton(text="Главное меню", callback_data="menu:main"))
     return keyboard
 
 
@@ -104,11 +118,16 @@ def queue_menu(message: Message, guard: Protection, title: str, keyboard: Inline
         guard.limit(state, "command", guard.settings.chat_interval)
 
 
+@dp.message(Command("myid"))
+async def my_id(message: Message, guard: Protection):
+    queue_menu(message, guard, f"Твой Telegram ID: {message.from_user.id}", section_keys())
+
+
 @dp.message(CommandStart())
 @dp.message(Command("menu"))
-async def start(message: Message, guard: Protection, state: FSMContext) -> None:
+async def start(message: Message, guard: Protection, state: FSMContext, repo: Catalog) -> None:
     await state.clear()
-    queue_menu(message, guard, MAIN_TEXT, menu_keys())
+    queue_menu(message, guard, MAIN_TEXT, menu_keys(repo.is_admin(message.from_user.id)))
 
 
 @dp.message(Command("help"))
@@ -139,14 +158,14 @@ async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state
             page = number(screen.partition(":")[2], 1_000_000) if screen.startswith("catalog:") else 0
         except CatalogError:
             return
-        title = "Выбери штрихкод" if page == 0 else f"Выбери штрихкод · страница {page+1}"
+        title = f"Выбери штрихкод · страница {page+1}"
         keyboard = section_keys(repo, page)
     elif screen == "menu:clean":
         title, keyboard = CLEAN_TEXT, section_keys()
     elif screen == "menu:help":
         title, keyboard = HELP_TEXT, section_keys()
     else:
-        title, keyboard = MAIN_TEXT, menu_keys()
+        title, keyboard = MAIN_TEXT, menu_keys(repo.is_admin(uid))
     markup = keyboard.as_markup()
     screen_key = (title, markup.model_dump_json())
     if runtime.screens.get(message.message_id) == screen_key:
@@ -230,7 +249,8 @@ async def send_barcode(query: CallbackQuery, repo: Catalog, guard: Protection) -
         await acknowledged.wait()
         current = repo.get(record.id)
         if current and current.active:
-            await send_png(message, current.name, current.value, guard, section_keys(repo, page).as_markup())
+            await send_png(message, current.name, current.value, guard,
+                           keys(("К каталогу ШК", f"catalog:{page}"), ("Главное меню", "menu:main")))
         else:
             await message.answer("ШК больше недоступен. Открой каталог заново.")
 

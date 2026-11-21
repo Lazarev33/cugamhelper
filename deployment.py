@@ -6,7 +6,6 @@ import fcntl
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -21,7 +20,7 @@ SERVICE = "tg-number-cleaner.service"
 UNIT_FILE = Path("/etc/systemd/system") / SERVICE
 CLI_LINK = Path("/usr/local/bin/numberbot")
 LOCK_FILE = CONFIG_DIR / "maintenance.lock"
-REMOTE = "git@github.com:Lazarev33/cugamhelper.git"
+REMOTE = "https://github.com/Lazarev33/cugamhelper.git"
 BRANCH = "refs/heads/main"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 RELEASE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -92,27 +91,14 @@ def release_label(path: Path) -> str:
 
 
 def git_environment() -> dict[str, str]:
-    key = CONFIG_DIR / "deploy_key"
-    hosts = CONFIG_DIR / "known_hosts"
-    if not (key.is_file() and hosts.is_file()):
-        raise DeploymentError(
-            f"Настрой SSH deploy key только для чтения. Нужны {key} и {hosts}. "
-            "См. раздел «Deploy key» в README."
-        )
-    if key.stat().st_uid != 0 or key.stat().st_mode & 0o077:
-        raise DeploymentError(f"Для {key} назначь владельца root и права 0600.")
-    # Фиксированный репозиторий, выделенная учётная запись SSH и закреплённый ключ GitHub.
-    ssh = [
-        "ssh", "-F", "/dev/null", "-i", str(key), "-o", "IdentitiesOnly=yes",
-        "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-        "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={hosts}",
-        "-o", "GlobalKnownHostsFile=/dev/null",
-    ]
     return {
         "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_SSH_COMMAND": shlex.join(ssh),
+        "GIT_ALLOW_PROTOCOL": "https",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.followRedirects",
+        "GIT_CONFIG_VALUE_0": "false",
         "GIT_TERMINAL_PROMPT": "0",
     }
 
@@ -123,8 +109,7 @@ def remote_revision() -> str:
         head = checked(["git", "ls-remote", "--exit-code", REMOTE, BRANCH], env=env, output=True)
     except (subprocess.SubprocessError, OSError):
         raise DeploymentError(
-            "GitHub недоступен. Проверь сеть VPS, публичную часть deploy key в Settings → "
-            "Deploy keys и ключ хоста GitHub в known_hosts."
+            "GitHub недоступен. Проверь DNS, системное время, сертификаты и HTTPS-соединение VPS."
         ) from None
     revision = head.split("\t", 1)[0]
     if not SHA_PATTERN.fullmatch(revision):

@@ -22,7 +22,7 @@ fi
 printf '\n[1/3] Проверяю системные зависимости...\n'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y python3 python3-venv python3-pip ca-certificates git openssh-client
+apt-get install -y python3 python3-venv python3-pip ca-certificates git
 python3 - <<'PY'
 import sys
 if sys.version_info < (3, 10):
@@ -43,5 +43,5 @@ printf '\n[3/3] Готовлю выпуск и подключаю службу..
 python3 "$SOURCE_DIR/deployment.py" "$SOURCE_DIR"
 
 printf '\nГотово! Открыть меню: sudo numberbot\n'
-printf '1 — задать токен, 2 — запустить бота.\n'
+printf 'При первом запуске меню предложит мастер настройки.\n'
 printf 'Токен хранится в %s/bot.env, не показывается в меню.\n' "$CONFIG_DIR"
