@@ -1,6 +1,6 @@
 # Помощник 2 смены
 
-Telegram-бот для сотрудников склада. Версия v2.5.0. Поддерживаются Ubuntu и Debian с systemd, Python 3.10+ и aiogram 3.x.
+Telegram-бот для сотрудников склада. Версия v2.5.1. Поддерживаются Ubuntu и Debian с systemd, Python 3.10+ и aiogram 3.x.
 
 ## Быстрый старт и переход с v2.4.0
 

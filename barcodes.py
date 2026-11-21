@@ -31,7 +31,7 @@ def render_png(value: str) -> bytes:
         "module_height": 24,
         "quiet_zone": 8,
         "font_size": 13,
-        "text_distance": 3,
+        "text_distance": 6,
     })
     return image.getvalue()
 

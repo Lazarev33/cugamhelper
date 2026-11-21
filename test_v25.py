@@ -90,6 +90,12 @@ class MaintenanceTests(unittest.TestCase):
 
 
 class ScannerQualityTests(unittest.TestCase):
+    def test_caption_below_bars(self):
+        image = Image.open(BytesIO(render_png("A-POL"))).convert("L")
+        # При 508 dpi полосы заканчиваются на строке 500 включительно.
+        self.assertEqual(image.crop((0, 501, image.width, 521)).getextrema(), (255, 255))
+        self.assertEqual(image.crop((0, 521, image.width, image.height)).getextrema()[0], 0)
+
     def test_jpeg_variants(self):
         value = " 00Mix_ed-9 "
         image = Image.open(BytesIO(render_png(value))).convert("L")
