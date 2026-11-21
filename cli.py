@@ -12,9 +12,10 @@ import sys
 import tempfile
 
 from branding import BOT_NAME
+from deployment import (
+    APP_DIR, SERVICE, DeploymentError, maintenance_lock, service_active, update,
+)
 
-SERVICE = "tg-number-cleaner.service"
-APP_DIR = Path("/opt/tg-number-cleaner")
 ENV_FILE = Path("/etc/tg-number-cleaner/bot.env")
 SERVICE_GROUP = "tgnumclean"
 TOKEN_PATTERN = re.compile(r"^[0-9]+:[A-Za-z0-9_-]{20,}$")
@@ -33,13 +34,6 @@ def configured() -> bool:
     except (OSError, UnicodeError):
         pass
     return False
-
-
-def service_active() -> bool:
-    return subprocess.run(
-        ["systemctl", "is-active", "--quiet", SERVICE],
-        check=False,
-    ).returncode == 0
 
 
 def invoke(command: list[str]) -> bool:
@@ -143,21 +137,42 @@ def logs(follow: bool = False) -> None:
 def run_tests() -> None:
     print("\nЗапускаю встроенные проверки без обращения к Telegram...")
     invoke([
-        sys.executable, "-m", "unittest", "discover", "-s", str(APP_DIR),
+        str(APP_DIR / ".venv/bin/python"), "-m", "unittest", "discover", "-s", str(APP_DIR),
         "-p", "test_*.py", "-v",
     ])
 
 
+def update_from_github() -> bool:
+    try:
+        update(configured=configured)
+    except (EOFError, KeyboardInterrupt):
+        print("\nОбновление отменено.")
+        return False
+    except (DeploymentError, OSError, subprocess.SubprocessError) as error:
+        print(f"Обновление не завершено. {error}", file=sys.stderr)
+        return False
+    return True
+
+
+def manage(action) -> None:
+    try:
+        with maintenance_lock():
+            action()
+    except DeploymentError as error:
+        print(error)
+
+
 def menu() -> None:
     actions = {
-        "1": edit_token,
-        "2": start,
-        "3": stop,
-        "4": restart,
+        "1": lambda: manage(edit_token),
+        "2": lambda: manage(start),
+        "3": lambda: manage(stop),
+        "4": lambda: manage(restart),
         "5": lambda: display_status(full=True),
         "6": logs,
         "7": lambda: logs(follow=True),
         "8": run_tests,
+        "9": update_from_github,
     }
     while True:
         print("\n" + "═" * 45)
@@ -174,6 +189,7 @@ def menu() -> None:
         print("  6. Последние 60 строк журнала")
         print("  7. Журнал в реальном времени")
         print("  8. Проверка кода (тесты)")
+        print("  9. Обновить из GitHub")
         print("  0. Выход")
         try:
             choice = input("\nВыбор: ").strip()
@@ -198,7 +214,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Управление Telegram-ботом на VPS")
     parser.add_argument(
         "action", nargs="?", default="menu",
-        choices=["menu", "token", "start", "stop", "restart", "status", "logs", "follow", "test"],
+        choices=["menu", "token", "start", "stop", "restart", "status", "logs", "follow", "test", "update"],
     )
     args = parser.parse_args()
     if os.geteuid() != 0:
@@ -207,12 +223,14 @@ def main() -> int:
     if not APP_DIR.joinpath("bot.py").exists():
         print("Бот не установлен. Запусти: sudo bash install.sh")
         return 1
+    if args.action == "update":
+        return 0 if update_from_github() else 1
     actions = {
         "menu": menu,
-        "token": edit_token,
-        "start": start,
-        "stop": stop,
-        "restart": restart,
+        "token": lambda: manage(edit_token),
+        "start": lambda: manage(start),
+        "stop": lambda: manage(stop),
+        "restart": lambda: manage(restart),
         "status": lambda: display_status(full=True),
         "logs": logs,
         "follow": lambda: logs(follow=True),

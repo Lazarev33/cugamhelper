@@ -1,3 +1,12 @@
 .env
 .venv/
 __pycache__/
+bot.env
+deploy_key
+deploy_key.pub
+.known_hosts
+known_hosts
+*.pem
+*.key
+*.zip
+REVISION

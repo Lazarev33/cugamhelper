@@ -36,19 +36,22 @@ def clean_numbers(text: str) -> tuple[list[str], list[int]]:
     return output, invalid
 
 
-def chunks(lines: list[str], limit: int = 3800) -> list[str]:
+def chunks(lines: list[str], limit: int = 4096) -> list[str]:
     """Split on line boundaries to respect Telegram's 4096-character limit."""
     result: list[str] = []
     current: list[str] = []
     current_length = 0
     for line in lines:
-        additional = len(line) + (1 if current else 0)
+        length = len(line.encode("utf-16-le")) // 2
+        if length > limit:
+            raise ValueError("Строка превышает лимит сообщения Telegram")
+        additional = length + bool(current)
         if current and current_length + additional > limit:
             result.append("\n".join(current))
             current = []
             current_length = 0
         current.append(line)
-        current_length += len(line) + (1 if current_length else 0)
+        current_length += length + bool(current_length)
     if current:
         result.append("\n".join(current))
     return result
