@@ -151,3 +151,17 @@ class AccessTests(TelegramCase):
         await self.feed(message={"message_id":3,"date":1,"chat":CHAT,"from":USER,
                                  "contact":{"first_name":"Тест","phone_number":"000"}})
         self.assertIn("только номер телефона",self.session.requests[-1].text)
+
+    async def test_start_visitor_approved_from_profile(self):
+        await self.feed(message={"message_id":3,"date":1,"chat":{**CHAT,"id":91},
+            "from":{**USER,"id":91,"first_name":"Тест","last_name":"Смена","username":"example_worker"},
+            "text":"/start"})
+        self.assertFalse(self.session.requests)
+        self.assertFalse(self.repo.allowed(91))
+        await self.click("ad:staffstarts:0")
+        await self.click(self.buttons()["Тест Смена · 91"])
+        self.assertIn("@example_worker",self.session.requests[-1].text)
+        self.assertFalse(self.repo.allowed(91))
+        await self.click(self.buttons()["Предоставить доступ"])
+        self.assertTrue(self.repo.allowed(91))
+        self.assertFalse(self.repo.visitors(42,0))

@@ -101,6 +101,8 @@ async def restrict_updates(handler, event: Update, data: dict):
             await query.answer()
         return
     if not data["repo"].allowed(user.id):
+        if not query and not user.is_bot and message.text and message.text.split(maxsplit=1)[:1] == ["/start"]:
+            data["repo"].remember_start(user.id,user.full_name,user.username)
         if query:
             await query.answer()
         return

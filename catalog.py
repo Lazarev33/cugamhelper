@@ -94,6 +94,9 @@ class Catalog:
                         self.db.executemany("INSERT OR IGNORE INTO trusted_users(user_id) VALUES (?)",
                                             ((uid,) for uid in legacy_ids or ()))
                         self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS start_visitors(
+                user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, username TEXT NOT NULL,
+                seen INTEGER NOT NULL)""")
         except BaseException:
             self.db.close()
             raise
@@ -220,7 +223,26 @@ class Catalog:
                 result = self.db.execute("DELETE FROM admins WHERE user_id=?", (target,))
             if not result.rowcount:
                 raise CatalogError("Администратор уже назначен." if enabled else "Права уже отозваны.")
+            if enabled:
+                self.db.execute("DELETE FROM start_visitors WHERE user_id=?",(target,))
             self.log(uid, "Назначен администратор" if enabled else "Отозваны права", str(target))
+
+    def remember_start(self, uid, name, username):
+        import time
+        now = int(time.time())
+        row = self.db.execute("SELECT seen FROM start_visitors WHERE user_id=?", (uid,)).fetchone()
+        if row and now-row[0]<60:
+            return
+        with self.transaction():
+            self.db.execute("INSERT OR REPLACE INTO start_visitors VALUES(?,?,?,?)",
+                            (uid,name[:160],username or "",now))
+            self.db.execute("""DELETE FROM start_visitors WHERE user_id IN
+                (SELECT user_id FROM start_visitors ORDER BY seen DESC,user_id DESC LIMIT -1 OFFSET 500)""")
+
+    def visitors(self, actor, page):
+        self.require_admin(actor)
+        return self.db.execute("""SELECT * FROM start_visitors ORDER BY seen DESC,user_id DESC
+            LIMIT ? OFFSET ?""",(PAGE_SIZE+1,page*PAGE_SIZE)).fetchall()
 
     def employee(self, target):
         return self.db.execute("SELECT * FROM trusted_users WHERE user_id=?", (target,)).fetchone()
@@ -267,4 +289,6 @@ class Catalog:
                 self.db.execute(f"UPDATE trusted_users SET {clause},revision=revision+1,updated_at={NOW} WHERE user_id=?",(*args,target))
             labels={"give":"Предоставлен доступ","restore":"Восстановлен доступ","disable":"Отозван доступ",
                     "name":"Изменено имя сотрудника","note":"Изменено примечание"}
+            if action in ("give","restore"):
+                self.db.execute("DELETE FROM start_visitors WHERE user_id=?",(target,))
             self.log(actor,labels[action],str(target))

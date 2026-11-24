@@ -40,7 +40,24 @@ async def screen(message, state, repo, uid, action, args):
         count=repo.db.execute("SELECT count(*) FROM trusted_users WHERE active=1").fetchone()[0]
         await tell(message,f"Доверенные пользователи\nРежим доступа: закрытый\nДопущено сотрудников: {count}",keys(
             ("Список сотрудников","ad:stafflist:0"),("Добавить сотрудника","ad:staffadd"),
-            ("Найти сотрудника","ad:staffsearch"),("Назад","ad:home")))
+            ("Нажимали /start","ad:staffstarts:0"), ("Найти сотрудника","ad:staffsearch"),("Назад","ad:home")))
+    elif action=="staffstarts":
+        page=number(args[0],100000)
+        rows=repo.visitors(uid,page)
+        buttons=[(f"{r['name']} · {r['user_id']}",f"ad:staffvisitor:{r['user_id']}") for r in rows[:PAGE_SIZE]]
+        if page:buttons.append(("‹ Ранее",f"ad:staffstarts:{page-1}"))
+        if len(rows)>PAGE_SIZE:buttons.append(("Далее ›",f"ad:staffstarts:{page+1}"))
+        await tell(message,"Выбери профиль для проверки." if rows else "Пока никто не нажимал /start без доступа.",
+                   keys(*buttons,back))
+    elif action=="staffvisitor":
+        target=number(args[0],2**52-1)
+        row=repo.db.execute("SELECT * FROM start_visitors WHERE user_id=?",(target,)).fetchone()
+        if not row or repo.allowed(target):raise CatalogError("Запись устарела.")
+        employee=repo.employee(target)
+        label="".join(c for c in row["name"] if c.isprintable())[:64]
+        note="@"+row["username"] if row["username"] else ""
+        await confirm(message,state,target=target,change="restore" if employee else "give",
+                      name=label,note=note,revision=employee["revision"] if employee else 0)
     elif action=="stafflist":
         await listing(message,state,repo,uid,"",number(args[0],1000000))
     elif action=="staffsearch":
