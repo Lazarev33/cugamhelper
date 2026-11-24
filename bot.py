@@ -20,6 +20,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
+from warehouse_bot import register as register_data
 from admin import number, register as register_workflows, send_png, keys
 from catalog import Catalog, CatalogError
 from dialogs import DialogStorage
@@ -51,7 +52,7 @@ def menu_keys(admin=False) -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="ШК", callback_data="menu:barcodes")
     keyboard.button(text="Сканировать ШК", callback_data="scan:start")
-    keyboard.button(text="Очистка номеров", callback_data="menu:clean")
+    keyboard.button(text="Обработка данных", callback_data="data:home")
     if admin:
         keyboard.button(text="Админ-панель", callback_data="ad:home")
     keyboard.button(text="Помощь", callback_data="menu:help")
@@ -267,6 +268,7 @@ async def send_barcode(query: CallbackQuery, repo: Catalog, guard: Protection) -
 
 
 register_workflows(dp)
+register_data(dp)
 
 
 @dp.callback_query()

@@ -163,7 +163,7 @@ class BotTests(TelegramCase):
             request = self.session.requests[-1]
             self.assertIn("Помощник 2 смены", request.text)
             self.assertEqual([button.text for row in request.reply_markup.inline_keyboard for button in row],
-                             ["ШК", "Сканировать ШК", "Очистка номеров", "Админ-панель", "Помощь"])
+                             ["ШК", "Сканировать ШК", "Обработка данных", "Админ-панель", "Помощь"])
             self.clock.now += 1.1
         await self.click("menu:barcodes")
         menu = self.session.requests[-1]

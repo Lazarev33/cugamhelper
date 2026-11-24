@@ -6,6 +6,7 @@ from pathlib import Path
 
 SETTINGS_PATH = Path("/etc/tg-number-cleaner/settings.json")
 LIMITS = {
+    "data_mib": (1,4), "data_rows": (1,10000), "data_parallel": (1,4), "data_timeout": (2,30), "data_ttl": (30,600),
     "barcode_cooldown": (0.1, 60),
     "clean_cooldown": (0.1, 120),
     "warning_interval": (0.1, 120),
@@ -19,6 +20,7 @@ LIMITS = {
     "send_timeout": (2, 30),
 }
 INTEGER_FIELDS = {
+    "data_mib","data_rows","data_parallel","data_timeout","data_ttl",
     "global_rate", "max_input_chars", "max_input_lines", "parallel_operations",
     "queue_size", "retry_attempts",
 }
@@ -26,6 +28,11 @@ INTEGER_FIELDS = {
 
 @dataclass(frozen=True)
 class Settings:
+    data_mib: int = 2
+    data_rows: int = 4000
+    data_parallel: int = 2
+    data_timeout: int = 12
+    data_ttl: int = 600
     barcode_cooldown: float = 2
     clean_cooldown: float = 5
     warning_interval: float = 15

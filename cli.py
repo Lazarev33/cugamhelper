@@ -104,7 +104,7 @@ def update_from_github() -> bool:
 
 DB = Path("/var/lib/tg-number-cleaner/catalog.sqlite3")
 BACKUPS = Path("/var/backups/tg-number-cleaner")
-LABELS = ["Задержка выдачи ШК, сек.", "Задержка очистки, сек.", "Интервал предупреждений, сек.",
+LABELS = ["Размер документа, МиБ","Строк в документе","Одновременных обработок данных","Таймаут обработки, сек.","Срок диалога данных, сек.","Задержка выдачи ШК, сек.", "Задержка очистки, сек.", "Интервал предупреждений, сек.",
           "Интервал отправки в чат, сек.", "Отправок в секунду", "Символов во вводе",
           "Строк во вводе", "Параллельных операций", "Мест в очереди", "Повторов при 429",
           "Таймаут отправки, сек."]
@@ -316,7 +316,7 @@ def dashboard():
             print("SQLite доступна · Активных ШК:", conn.execute("SELECT count(*) FROM barcodes WHERE active=1").fetchone()[0])
     except sqlite3.Error:
         print("SQLite недоступна. При первой установке запусти бота для создания каталога.")
-    print("GitHub: публичный HTTPS")
+    print("GitHub: HTTPS без авторизации")
 
 
 def diagnostics():
@@ -338,7 +338,7 @@ def diagnostics():
         ("Служба (посмотри журнал)", service_active),
         ("SQLite (проверь запуск службы)", db_check),
         ("Файлы релиза (переустанови выпуск)", lambda: all((APP_DIR / p).is_file() for p in (APP_DIR / "deploy-files.txt").read_text().splitlines())),
-        ("Python и библиотеки (переустанови выпуск)", lambda: invoke([str(python), "-c", "import sys, aiogram, barcode, PIL, zxingcpp, dotenv; sys.exit(sys.version_info < (3,10))"])),
+        ("Python и библиотеки (переустанови выпуск)", lambda: invoke([str(python), "-c", "import sys, aiogram, barcode, PIL, zxingcpp, dotenv, openpyxl, docx, lxml; sys.exit(sys.version_info < (3,10))"])),
         ("GitHub (проверь HTTPS)", remote_revision),
         ("Telegram getMe (проверь сеть и токен)", telegram),
     ]
