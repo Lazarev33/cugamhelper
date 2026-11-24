@@ -153,6 +153,7 @@ def register(dp, clean):
         if not isinstance(query.message,Message) or guard.busy(uid):
             await query.answer("Подожди немного.")
             return
+        active.intersection_update(guard.heavy.keys)
         user = guard.state(uid)
         if user is None or mode not in {"cancel","ref"} and (guard.remaining(user,"clean" if mode=="clean" else "data") or len(active)>=guard.settings.data_parallel):
             await query.answer("Подожди немного и нажми ещё раз.")
@@ -219,6 +220,7 @@ def register(dp, clean):
         if mode=="ref" and "first" not in data:
             await state.update_data(first=source,opts={})
             await message.answer("Эталон получен. Пришли проверяемый список.");return
+        active.intersection_update(guard.heavy.keys)
         if guard.remaining(user,"data") or len(active)>=cfg.data_parallel:
             if guard.warning(user,"data",cfg.warning_interval):
                 await message.answer("Подожди немного и повтори.")

@@ -1,6 +1,7 @@
 """Telegram-диалоги каталога, управления ролями и сканирования."""
 
 import asyncio
+import employees
 from contextvars import ContextVar
 from dataclasses import replace
 import re
@@ -34,6 +35,7 @@ class Flow(StatesGroup):
     choose = State()
     confirm = State()
     grant = State()
+    staff = State()
 
 
 def keys(*buttons) -> InlineKeyboardMarkup:
@@ -95,7 +97,7 @@ async def set_flow(state, stage, kind, **data):
 async def panel(message):
     markup = keys(
         ("Каталог ШК", "ad:list:0"), ("Добавить вручную", "ad:manual"), ("Добавить по фото", "ad:scan"),
-        ("Администраторы", "ad:roles:0"), ("Журнал изменений", "ad:log"), ("Главное меню", "menu:main"),
+        ("Доверенные пользователи","ad:staff"), ("Администраторы", "ad:roles:0"), ("Журнал изменений", "ad:log"), ("Главное меню", "menu:main"),
     )
     rows = markup.inline_keyboard
     rows[1:3] = [rows[1] + rows[2]]
@@ -144,8 +146,12 @@ async def preview(message, state, guard, repo, data, name, value):
 async def admin_action(message, state, guard, repo, uid, action, args):
     repo.require_admin(uid)
     await state.clear()
+    if action.startswith("staff") and (not args and action not in {"staff","staffadd","staffsearch"}):
+        raise CatalogError("Некорректная кнопка.")
     if action == "home" and not args:
         await panel(message)
+    elif action.startswith("staff"):
+        await employees.screen(message,state,repo,uid,action,args)
     elif action == "list" and len(args) == 1:
         page = number(args[0], 1_000_000)
         records, more = repo.page(page)
@@ -178,7 +184,10 @@ async def admin_action(message, state, guard, repo, uid, action, args):
             await set_flow(state, Flow.grant, "grant")
             await tell(message, "Введи числовой Telegram user ID.", keys(CANCEL))
         elif action == "revoke" and len(args) == 1:
-            await confirmation(message, state, action, target=number(args[0], 2**52-1))
+            target = number(args[0], 2**52-1)
+            employee = repo.employee(target)
+            remaining = "Сохранится доступ сотрудника." if employee and employee["active"] else "Доступ к боту прекратится."
+            await confirmation(message, state, action, target=target, remaining=remaining)
         else:
             raise CatalogError("Кнопка устарела. Открой /admin.")
     else:
@@ -217,6 +226,8 @@ async def confirmation(message, state, kind, **data):
     else:
         action = "Назначить администратора" if kind == "grant" else "Отозвать права"
         prompt = f"{action} для Telegram ID {data['target']}?"
+        if kind == "revoke":
+            prompt += "\n" + data["remaining"]
     await tell(message, prompt, keys(("Подтвердить", f"flow:ok:{nonce}"), CANCEL))
 
 
@@ -228,7 +239,9 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
     if kind != "scan":
         repo.require_admin(uid)
     stage = await state.get_state()
-    if action == "pick" and stage == Flow.choose.state and len(args) == 2:
+    if action=="staffpage" and kind=="staffresults" and len(args)==2:
+        await employees.listing(message,state,repo,uid,data["query"],number(args[1],1000000))
+    elif action == "pick" and stage == Flow.choose.state and len(args) == 2:
         index = number(args[1], 15)
         if index >= len(data["codes"]):
             raise CatalogError("Выбери код из списка.")
@@ -243,7 +256,15 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
                        old=old, name=data["name"], value=data["value"])
         await tell(message, "Введи название кнопки." if origin != "value" else "Введи новое значение.", keys(CANCEL))
     elif action == "ok" and stage == Flow.confirm.state and len(args) == 1:
-        if kind == "save":
+        if kind == "employee":
+            target=data["target"]
+            repo.change_employee(uid,target,data["change"],data.get("revision",0),data.get("name",""),data.get("note",""))
+            if data["change"]=="disable":
+                guard.revoke(target)
+                await FSMContext(state.storage,replace(state.key,chat_id=target,user_id=target)).clear()
+            await state.clear()
+            await tell(message,"Изменение сохранено.",keys(("Карточка сотрудника",f"ad:staffcard:{target}")))
+        elif kind == "save":
             record = repo.save(uid, data["name"], data["value"], data["old"])
             await state.clear()
             await tell(message, "ШК сохранён.", keys(("Открыть запись", f"ad:open:{record.id}"), ("Панель", "ad:home")))
@@ -255,10 +276,11 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
             target = data["target"]
             repo.set_admin(uid, target, kind == "grant")
             if kind == "revoke":
+                guard.revoke(target)
                 revoked = FSMContext(state.storage, replace(state.key, chat_id=target, user_id=target))
                 await revoked.clear()
             await state.clear()
-            await tell(message, "Права обновлены.", keys(("Администраторы", "ad:roles:0")))
+            await tell(message, ("Права обновлены." if kind=="grant" else "Роль отозвана. " + ("Сохранён доступ сотрудника." if repo.allowed(target) else "Доступ к боту закрыт.")), keys(("Администраторы", "ad:roles:0")))
     else:
         raise CatalogError("Кнопка устарела. Начни действие заново.")
 
@@ -299,7 +321,9 @@ async def form_text(message, state, guard, repo, uid, data, stage):
     kind = data["kind"]
     if kind != "scan":
         repo.require_admin(uid)
-    if stage == Flow.name.state and message.text is not None:
+    if stage == Flow.staff.state:
+        await employees.step(message,state,repo,uid,data)
+    elif stage == Flow.name.state and message.text is not None:
         name = validate_name(message.text)
         old = data.get("old")
         if kind in {"rename", "add_photo"}:

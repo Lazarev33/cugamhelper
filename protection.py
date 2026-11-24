@@ -30,6 +30,7 @@ class Outgoing:
         self.ack_credits = 32.0
         self.ack_tick = clock()
         self.ack_active = 0
+        self.allowed = None
 
     async def reserve(self, method, deadline: float) -> float:
         while True:
@@ -94,6 +95,8 @@ class Outgoing:
         deadline = self.clock() + self.settings.send_timeout
         for attempt in range(self.settings.retry_attempts + 1):
             remaining = await self.reserve(method, deadline)
+            if self.allowed and not self.allowed(method.chat_id):
+                raise asyncio.CancelledError
             try:
                 return await request(bot, method, timeout=min(8, remaining))
             except TelegramRetryAfter as error:
@@ -113,6 +116,7 @@ class Jobs:
         self.waiting = waiting
         self.queue = deque()
         self.tasks = set()
+        self.running = {}
         self.keys = set()
         self.closing = False
         self.log_after = 0.0
@@ -135,9 +139,11 @@ class Jobs:
 
         task = asyncio.create_task(run())
         self.tasks.add(task)
+        self.running[key] = task
         task.add_done_callback(lambda completed: self.finished(key, completed))
 
     def finished(self, key, task) -> None:
+        self.running.pop(key, None)
         self.tasks.discard(task)
         self.keys.discard(key)
         if not task.cancelled() and (error := task.exception()):
@@ -147,6 +153,13 @@ class Jobs:
                 LOG.warning("Операция Telegram завершилась ошибкой: %s", type(error).__name__)
         if not self.closing and self.queue:
             self.start(*self.queue.popleft())
+
+    def revoke(self, key):
+        if key in self.running:
+            self.running[key].cancel()
+        else:
+            self.queue = deque(pair for pair in self.queue if pair[0]!=key)
+            self.keys.discard(key)
 
     async def close(self) -> None:
         self.closing = True
@@ -177,6 +190,7 @@ class Protection:
         self.users = OrderedDict()
         self.updates = OrderedDict()
         self.scans: set[int] = set()
+        self.handlers = {}
         self.log_after = {}
 
     def note(self, reason: str) -> None:
@@ -209,6 +223,14 @@ class Protection:
         state.expires = now + 180
         self.users.move_to_end(uid)
         return state
+
+    def revoke(self, uid):
+        for task in self.handlers.get(uid, ()):
+            task.cancel()
+        for pool in (self.heavy,self.light,self.edits):
+            pool.revoke(uid)
+        self.users.pop(uid,None)
+        self.scans.discard(uid)
 
     def busy(self, uid: int) -> bool:
         return uid in self.heavy.keys or uid in self.light.keys

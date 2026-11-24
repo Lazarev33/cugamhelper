@@ -158,10 +158,8 @@ def apply_settings(changes, token=None, launch=False):
         load_settings(SETTINGS_PATH)
         values = json.loads(SETTINGS_PATH.read_bytes()) if SETTINGS_PATH.exists() else {}
         values.update(changes)
-        owner = values.get("owner_telegram_id")
-        allowed = values.get("allowed_user_ids")
-        if owner and allowed is not None and owner not in allowed:
-            raise ValueError("Сначала включи владельца в список разрешённых пользователей.")
+        if "allowed_user_ids" in changes:
+            raise ValueError("Управляй сотрудниками через /admin.")
         content = json.dumps(values, indent=2, ensure_ascii=False).encode() + b"\n"
         with tempfile.NamedTemporaryFile(dir=SETTINGS_PATH.parent) as candidate:
             candidate.write(content)
@@ -209,12 +207,10 @@ def setup(mode):
         verify_token(token)
     if mode == "owner" or (mode == "setup" and settings.owner_telegram_id is None):
         print("Текущий владелец:", settings.owner_telegram_id or "не назначен")
-        raw = input("Telegram ID владельца (/myid у запущенного бота, Enter — пропустить): ").strip()
+        raw = input("Telegram ID владельца (число, Enter — оставить без изменений): ").strip()
         if raw:
             owner = uid(raw)
             changes["owner_telegram_id"] = owner
-            if settings.allowed_user_ids is not None:
-                changes["allowed_user_ids"] = sorted(settings.allowed_user_ids | {owner})
         elif mode == "owner":
             return
     print("Токен:", "проверен" if token else "сохранённый",
@@ -256,28 +252,8 @@ def settings_menu():
                 setup("token" if choice == "1" else "owner")
                 continue
             if choice == "3":
-                allowed = current.allowed_user_ids
-                print("Доступ:", "все личные чаты" if allowed is None else sorted(allowed))
-                print("1  Открыть всем   2  Ограничить / добавить ID   3  Удалить ID   0  Назад")
-                action = input("Выбор: ").strip()
-                if action == "1":
-                    value = None
-                elif action in {"2", "3"}:
-                    print("Сохрани доступ владельцу и действующим администраторам.")
-                    ids = set(allowed or [])
-                    target = uid(input("Telegram ID: ").strip())
-                    if action == "2":
-                        ids.add(target)
-                        if current.owner_telegram_id:
-                            ids.add(current.owner_telegram_id)
-                    elif allowed is None:
-                        raise ValueError("Сначала включи ограниченный доступ.")
-                    else:
-                        ids.discard(target)
-                    value = sorted(ids)
-                else:
-                    continue
-                changes = {"allowed_user_ids": value}
+                print("Закрытый режим. Управление сотрудниками: /admin → Доверенные пользователи.")
+                continue
             elif choice == "4":
                 mode = input("1  Фото   2  Оригинальный PNG   0  Назад: ")
                 if mode not in {"1", "2"}:
@@ -313,6 +289,9 @@ def dashboard():
         print("Проверь настройки:", e)
     try:
         with closing(database()) as conn:
+            print("Закрытый режим · Администраторы:", conn.execute("SELECT count(*) FROM admins").fetchone()[0])
+            counts=dict(conn.execute("SELECT active,count(*) FROM trusted_users GROUP BY active"))
+            print("Допущено сотрудников:",counts.get(1,0),"· Отключено:",counts.get(0,0))
             print("SQLite доступна · Активных ШК:", conn.execute("SELECT count(*) FROM barcodes WHERE active=1").fetchone()[0])
     except sqlite3.Error:
         print("SQLite недоступна. При первой установке запусти бота для создания каталога.")

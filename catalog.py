@@ -9,7 +9,7 @@ import tempfile
 from barcodes import load_seed_values, validate_value
 
 PAGE_SIZE = 9
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 NOW = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
 SCHEMA = (
     f"""CREATE TABLE barcodes (
@@ -62,7 +62,7 @@ def validate_name(name: str) -> str:
 
 
 class Catalog:
-    def __init__(self, path: Path, owner: int | None = None, *, seed=load_seed_values):
+    def __init__(self, path: Path, owner: int | None = None, *, seed=load_seed_values, legacy_ids=None):
         self.owner = owner
         existed = path.is_file() and path.stat().st_size > 0
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -70,9 +70,9 @@ class Catalog:
         self.db.row_factory = sqlite3.Row
         try:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise CatalogError("Версия схемы каталога не поддерживается этим выпуском.")
-            if version == 0:
+            if version < SCHEMA_VERSION:
                 # Перед изменением существующей схемы сохраняем согласованный снимок SQLite.
                 if existed:
                     self.backup(path.with_name(f"{path.name}.schema-{version}.bak"))
@@ -84,6 +84,15 @@ class Catalog:
                             "INSERT INTO barcodes(name, value) VALUES (?, ?)",
                             ((value, value) for value in seed()),
                         )
+                    if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
+                        self.db.execute(f"""CREATE TABLE trusted_users (
+                            user_id INTEGER PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '',
+                            note TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1,
+                            created_at TEXT NOT NULL DEFAULT ({NOW}), created_by INTEGER,
+                            updated_at TEXT NOT NULL DEFAULT ({NOW}), revoked_at TEXT, revoked_by INTEGER,
+                            revision INTEGER NOT NULL DEFAULT 1)""")
+                        self.db.executemany("INSERT OR IGNORE INTO trusted_users(user_id) VALUES (?)",
+                                            ((uid,) for uid in legacy_ids or ()))
                         self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         except BaseException:
             self.db.close()
@@ -212,3 +221,50 @@ class Catalog:
             if not result.rowcount:
                 raise CatalogError("Администратор уже назначен." if enabled else "Права уже отозваны.")
             self.log(uid, "Назначен администратор" if enabled else "Отозваны права", str(target))
+
+    def employee(self, target):
+        return self.db.execute("SELECT * FROM trusted_users WHERE user_id=?", (target,)).fetchone()
+
+    def allowed(self, target):
+        if self.owner is None:
+            return False
+        if self.is_admin(target):
+            return True
+        row = self.employee(target)
+        return bool(row and row["active"])
+
+    def employees(self, query, page):
+        self.db.create_function("fold", 1, str.casefold)
+        return self.db.execute("""SELECT * FROM trusted_users WHERE
+            instr(fold(display_name),?) OR instr(fold(note),?) OR instr(CAST(user_id AS TEXT),?)
+            ORDER BY active DESC,user_id LIMIT ? OFFSET ?""",
+            (query.casefold(),query.casefold(),query,PAGE_SIZE+1,page*PAGE_SIZE)).fetchall()
+
+    def change_employee(self, actor, target, action, revision=0, name="", note=""):
+        with self.transaction():
+            self.require_admin(actor)
+            if type(target) is not int or not 0 < target < 2**52:
+                raise CatalogError("Некорректный Telegram ID.")
+            if self.is_admin(target):
+                raise CatalogError("Доступ предоставлен административной ролью.")
+            if len(name)>64 or len(note)>200 or any(v and not v.isprintable() for v in (name,note)):
+                raise CatalogError("Максимум 64 символа для имени и 200 для примечания.")
+            row = self.employee(target)
+            if action=="give":
+                if row:
+                    raise CatalogError("Данный пользователь уже имеет доступ к боту." if row["active"] else "Открой карточку и восстанови доступ.")
+                self.db.execute("INSERT INTO trusted_users(user_id,display_name,note,created_by) VALUES (?,?,?,?)",
+                                (target,name,note,actor))
+            else:
+                if not row or row["revision"]!=revision:
+                    raise CatalogError("Карточка устарела. Открой её заново.")
+                if action in ("disable","restore") and bool(row["active"])==(action=="restore"):
+                    raise CatalogError("Статус уже изменился.")
+                fields={"disable":(f"active=0,revoked_at={NOW},revoked_by=?", [actor]),
+                        "restore":("active=1,revoked_at=NULL,revoked_by=NULL", []),
+                        "name":("display_name=?", [name]), "note":("note=?", [note])}
+                clause,args=fields[action]
+                self.db.execute(f"UPDATE trusted_users SET {clause},revision=revision+1,updated_at={NOW} WHERE user_id=?",(*args,target))
+            labels={"give":"Предоставлен доступ","restore":"Восстановлен доступ","disable":"Отозван доступ",
+                    "name":"Изменено имя сотрудника","note":"Изменено примечание"}
+            self.log(actor,labels[action],str(target))

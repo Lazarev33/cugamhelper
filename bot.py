@@ -93,8 +93,6 @@ def section_keys(repo: Catalog | None = None, page: int = 0) -> InlineKeyboardBu
 @dp.update.outer_middleware()
 async def restrict_updates(handler, event: Update, data: dict):
     guard: Protection = data["guard"]
-    if guard.duplicate(event.update_id):
-        return
     query = event.callback_query
     message = query.message if query else event.message
     user = query.from_user if query else message.from_user if message else None
@@ -102,12 +100,21 @@ async def restrict_updates(handler, event: Update, data: dict):
         if query:
             await query.answer()
         return
-    allowed = guard.settings.allowed_user_ids
-    if allowed is not None and user.id not in allowed:
+    if not data["repo"].allowed(user.id):
         if query:
             await query.answer()
         return
-    return await handler(event, data)
+    if guard.duplicate(event.update_id):
+        return
+    task = asyncio.current_task()
+    handlers = guard.handlers.setdefault(user.id, set())
+    handlers.add(task)
+    try:
+        return await handler(event, data)
+    finally:
+        handlers.discard(task)
+        if not handlers:
+            guard.handlers.pop(user.id, None)
 
 
 def queue_menu(message: Message, guard: Protection, title: str, keyboard: InlineKeyboardBuilder) -> None:
@@ -370,7 +377,7 @@ async def main() -> None:
     try:
         settings = load_settings()
         location = Path(os.getenv("STATE_DIRECTORY") or Path(__file__).with_name(".state"))
-        repo = Catalog(location / "catalog.sqlite3", settings.owner_telegram_id)
+        repo = Catalog(location / "catalog.sqlite3", settings.owner_telegram_id, legacy_ids=settings.allowed_user_ids)
     except (OSError, ValueError) as error:
         raise SystemExit(f"Ошибка конфигурации бота: {error}") from None
 
@@ -410,6 +417,9 @@ async def main() -> None:
         except TelegramAPIError as error:
             logging.warning("Не удалось задать команды бота: %s", type(error).__name__)
         guard = Protection(settings)
+        guard.outgoing.allowed = repo.allowed
+        if repo.owner is None:
+            logging.warning("Доступ закрыт. Назначь владельца через sudo numberbot owner.")
         bot.session.middleware.register(guard.outgoing)
         try:
             await dp.start_polling(

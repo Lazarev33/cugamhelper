@@ -62,7 +62,7 @@ class TelegramCase(unittest.IsolatedAsyncioTestCase):
         await dp.storage.close()
         work = TemporaryDirectory()
         self.addCleanup(work.cleanup)
-        self.repo = Catalog(Path(work.name) / "catalog.sqlite3", owner=42, seed=lambda: self.values)
+        self.repo = Catalog(Path(work.name) / "catalog.sqlite3", owner=42, seed=lambda: self.values, legacy_ids=(43,44,45))
         self.addCleanup(self.repo.close)
         self.session = TelegramStub()
         self.bot = Bot(token="123456:unit_test_token", session=self.session)
@@ -300,7 +300,7 @@ class BotTests(TelegramCase):
         self.assertTrue(all(isinstance(req, AnswerCallbackQuery) for req in self.session.requests))
         self.configure(replace(Settings(), allowed_user_ids=frozenset({43})))
         self.session.requests.clear()
-        await self.send("1")
+        await self.send("1",uid=100)
         await self.feed(message={"message_id": 9, "date": 1, "chat": {"id": 43, "type": "private"},
                                  "from": {**USER, "id": 43}})
         self.assertEqual(self.session.requests, [])

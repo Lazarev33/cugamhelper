@@ -271,13 +271,13 @@ class AdminTests(TelegramCase):
         await self.click(self.buttons()["Подтвердить"])
         self.assertTrue(self.repo.is_admin(42))
 
-    async def test_unconfigured_owner_blocks_admin_and_keeps_staff_access(self):
-        self.repo.set_admin(42, 43, True)
-        self.repo.owner = None
-        await self.send("/admin", 43)
-        self.assertIn("Доступ к админ-панели закрыт", self.session.requests[-1].text)
-        await self.click("menu:barcodes", 43)
-        self.assertIn("A-POL", self.buttons())
+    async def test_unconfigured_owner_closes_access(self):
+        self.repo.set_admin(42,43,True)
+        self.repo.owner=None
+        await self.send("/admin",43)
+        self.assertEqual(self.session.requests,[])
+        await self.click("menu:barcodes",43)
+        self.assertIsNone(self.session.requests[-1].text)
 
     async def test_duplicate_appearing_while_preview_open_and_delete_confirmation(self):
         await self.manual("Ручное имя", "ABC")
