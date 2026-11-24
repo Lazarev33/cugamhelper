@@ -162,6 +162,7 @@ async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state
         title = f"Выбери штрихкод · страница {page+1}"
         keyboard = section_keys(repo, page)
     elif screen == "menu:clean":
+        await state.set_state("clean")
         title, keyboard = CLEAN_TEXT, section_keys()
     elif screen == "menu:help":
         title, keyboard = HELP_TEXT, section_keys()
@@ -268,7 +269,7 @@ async def send_barcode(query: CallbackQuery, repo: Catalog, guard: Protection) -
 
 
 register_workflows(dp)
-register_data(dp)
+register_data(dp, lambda message, guard, uid, text: clean_input(message, guard, uid, text))
 
 
 @dp.callback_query()
@@ -284,7 +285,10 @@ async def send_plain(message: Message, text: str) -> Message:
 
 @dp.message(F.text)
 async def handle_text(message: Message, guard: Protection) -> None:
-    uid = message.from_user.id
+    await clean_input(message, guard, message.from_user.id, message.text)
+
+
+async def clean_input(message, guard, uid, text):
     state = guard.state(uid)
     if state is None:
         return
@@ -297,7 +301,7 @@ async def handle_text(message: Message, guard: Protection) -> None:
         if guard.warning(state, "clean", guard.settings.warning_interval):
             guard.light.submit(uid, lambda: send_plain(message, f"Слишком частые запросы. Подожди {remaining} сек."))
         return
-    if guard.heavy.submit(uid, lambda: process_numbers(message, message.text, guard)):
+    if guard.heavy.submit(uid, lambda: process_numbers(message, text, guard)):
         guard.limit(state, "clean", guard.settings.clean_cooldown)
     else:
         guard.note("очередь тяжёлых операций заполнена")

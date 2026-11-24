@@ -19,6 +19,7 @@ from parser import chunks
 
 class Data(StatesGroup):
     input=State()
+    offer=State()
 
 
 MENU={
@@ -73,7 +74,7 @@ class Buffer(BytesIO):
         return super().write(b)
 
 
-def register(dp):
+def register(dp, clean):
     active=set()
 
     @dp.callback_query(F.data.startswith("data:"))
@@ -94,6 +95,80 @@ def register(dp):
                 if "not modified" not in e.message.lower():
                     await query.message.answer(TITLE[mode],reply_markup=markup(mode))
         guard.light.submit(uid,screen)
+
+    @dp.message(StateFilter(None, Data.offer), F.document | (F.text & ~F.text.startswith("/")))
+    async def suggest(message, state, guard):
+        uid = message.from_user.id
+        if guard.busy(uid) or guard.state(uid) is None:
+            return
+        doc = message.document
+        kind = Path(doc.file_name or "").suffix.lower()[1:] if doc else "text"
+        async def offer():
+            if kind not in {"xlsx", "docx", "txt", "text"}:
+                await message.answer("Для обработки пришли XLSX, DOCX или TXT.")
+                return
+            if doc and (doc.file_size or 0) > guard.settings.data_mib * 1024**2:
+                await message.answer("Файл превышает лимит размера.")
+                return
+            if not doc and len(message.text) > guard.settings.max_input_chars:
+                await message.answer("Раздели текст на несколько сообщений.")
+                return
+            source = {"kind": kind, "opts": {}}
+            if doc:
+                source["id"] = doc.file_id
+            else:
+                source["text"] = message.text
+            nonce = token_hex(6)
+            actions = [("Сортировать", "asc"), ("Найти дубликаты", "dups"),
+                       ("Проверить пары", "pairs"), ("Использовать как эталон", "ref")]
+            if kind in {"xlsx", "docx"}:
+                actions.insert(0, ("Сопоставить столбцы", "align"))
+            if kind != "xlsx":
+                actions.insert(0, ("Сверить два списка", "quick"))
+            if kind == "text":
+                actions.append(("Очистить номера", "clean"))
+            actions.append(("Отмена", "cancel"))
+            buttons = keys(*[(label, f"offer:{nonce}:{mode}") for label, mode in actions])
+            rows = buttons.inline_keyboard
+            buttons.inline_keyboard = [sum(rows[i:i+2], []) for i in range(0,len(rows),2)]
+            await state.set_state(Data.offer)
+            await state.set_data({"source":source, "nonce":nonce, "at":monotonic()})
+            await message.answer("Что сделать с файлом?" if doc else "Что сделать с текстом?", reply_markup=buttons)
+        guard.light.submit(uid, offer)
+
+    @dp.callback_query(F.data.startswith("offer:"))
+    async def choose(query, state, guard):
+        uid = query.from_user.id
+        pending = await state.get_data()
+        fields = query.data.split(":")
+        if (len(fields)!=3 or await state.get_state()!=Data.offer.state or
+                fields[1]!=pending.get("nonce") or monotonic()-pending["at"]>guard.settings.data_ttl):
+            await query.answer("Выбор устарел. Пришли данные ещё раз.")
+            return
+        mode = fields[2]
+        source = pending["source"]
+        if mode not in {"asc","dups","pairs","ref","align","quick","clean","cancel"} or mode=="clean" and source["kind"]!="text":
+            await query.answer("Действие недоступно.")
+            return
+        if not isinstance(query.message,Message) or guard.busy(uid):
+            await query.answer("Подожди немного.")
+            return
+        user = guard.state(uid)
+        if user is None or mode not in {"cancel","ref"} and (guard.remaining(user,"clean" if mode=="clean" else "data") or len(active)>=guard.settings.data_parallel):
+            await query.answer("Подожди немного и нажми ещё раз.")
+            return
+        await state.clear()
+        if mode not in {"clean","cancel"}:
+            data={"mode":mode,"nonce":token_hex(8),"opts":{},"at":monotonic()}
+            await state.set_state(Data.input)
+            await state.set_data(data)
+        await query.answer()
+        if mode=="cancel":
+            await query.message.edit_text("Действие отменено.")
+        elif mode=="clean":
+            await clean(query.message, guard, uid, source["text"])
+        else:
+            await submit(query.message,state,guard,uid,data,source)
 
     @dp.message(StateFilter(Data.input))
     async def receive(message,state,guard):
@@ -134,6 +209,13 @@ def register(dp):
             source={"kind":kind,"id":doc.file_id,"opts":opts}
         elif not text or len(text)>cfg.max_input_chars:
             await message.answer("Отправь текст или поддерживаемый файл.");return
+        await submit(message,state,guard,uid,data,source)
+
+    async def submit(message,state,guard,uid,data,source):
+        cfg=guard.settings
+        user=guard.state(uid)
+        mode=data["mode"]
+        opts=source["opts"]
         if mode=="ref" and "first" not in data:
             await state.update_data(first=source,opts={})
             await message.answer("Эталон получен. Пришли проверяемый список.");return

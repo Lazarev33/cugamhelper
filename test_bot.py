@@ -119,6 +119,13 @@ class TelegramCase(unittest.IsolatedAsyncioTestCase):
 
 
 class BotTests(TelegramCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        for uid in (42, 43):
+            ctx = dp.fsm.get_context(bot=self.bot, chat_id=uid, user_id=uid)
+            await ctx.set_state("clean")
+        self.session.requests.clear()
+
     async def test_exact_copy_of_100_ids(self):
         ids = ["00000001", "12345678", "00000001", "00001234"] * 25
         await self.send("\n".join(f"{value}-03.11.2026" for value in ids))

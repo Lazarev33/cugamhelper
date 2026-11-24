@@ -73,6 +73,28 @@ class ProcessingTests(unittest.TestCase):
 
 
 class TelegramProcessing(TelegramCase):
+    async def test_direct_text_offer_and_stale_button(self):
+        await self.send("B\nA\n\nA\nB")
+        prompt = self.session.requests[-1]
+        button = prompt.reply_markup.inline_keyboard[0][0]
+        await self.click(button.callback_data)
+        report, first, second = self.session.requests[-3:]
+        self.assertIn("Сошлось: 2/2", report.text)
+        self.assertEqual(first.text, "A\nB")
+        self.assertEqual(second.text, first.text)
+        await self.click(button.callback_data)
+        self.assertIn("устарел", self.session.requests[-1].text)
+
+    async def test_direct_file_becomes_reference(self):
+        await self.feed(message={"message_id":6,"date":1,"chat":{"id":42,"type":"private"},
+            "from":{"id":42,"first_name":"A","is_bot":False},
+            "document":{"file_id":"example","file_unique_id":"u","file_name":"stock.xlsx"}})
+        prompt = self.session.requests[-1]
+        buttons = [b for row in prompt.reply_markup.inline_keyboard for b in row]
+        self.assertTrue(any(b.text=="Сопоставить столбцы" for b in buttons))
+        await self.click(next(b.callback_data for b in buttons if b.callback_data.endswith(":ref")))
+        self.assertIn("Эталон получен", self.session.requests[-1].text)
+
     async def test_quick_three_messages(self):
         await self.click("data:check")
         before=len(self.session.requests)
@@ -97,6 +119,7 @@ class TelegramProcessing(TelegramCase):
         await self.send("private reference")
         await self.send("/cancel")
         self.clock.now+=10
+        await self.click("menu:clean")
         await self.send("0009")
         self.assertEqual(self.session.requests[-1].text,"0009")
 
