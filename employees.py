@@ -4,6 +4,34 @@ from secrets import randbelow
 from catalog import CatalogError, PAGE_SIZE
 
 
+async def request_person(message, state, stage, kind, label):
+    from admin import set_flow
+    request_id = randbelow(2**31)
+    await set_flow(state, stage, kind, request_id=request_id)
+    button = KeyboardButton(text=label, request_users=KeyboardButtonRequestUsers(
+        request_id=request_id, user_is_bot=False, max_quantity=1))
+    await message.answer("Выбери человека кнопкой, отправь его контакт Telegram или введи числовой ID. /cancel — отмена.",
+        reply_markup=ReplyKeyboardMarkup(keyboard=[[button]], resize_keyboard=True, one_time_keyboard=True))
+
+
+def person_id(message, data):
+    from admin import number
+    if message.users_shared:
+        shared = message.users_shared
+        if shared.request_id != data["request_id"] or len(shared.users) != 1:
+            raise CatalogError("Выбор устарел. Используй кнопку текущего запроса.")
+        target = shared.users[0].user_id
+    elif message.contact:
+        target = message.contact.user_id
+        if target is None:
+            raise CatalogError("В карточке есть только номер телефона. Нажми кнопку выбора человека или введи Telegram ID.")
+    else:
+        target = number(message.text or "", 2**52-1)
+    if not 0 < target < 2**52:
+        raise CatalogError("Нужен положительный Telegram ID.")
+    return target
+
+
 async def screen(message, state, repo, uid, action, args):
     from admin import Flow, set_flow, keys, tell, number, CANCEL
     repo.require_admin(uid)
@@ -19,12 +47,7 @@ async def screen(message, state, repo, uid, action, args):
         await set_flow(state,Flow.staff,"find")
         await tell(message,"Введи ID, имя или часть примечания.",keys(CANCEL))
     elif action=="staffadd":
-        request_id=randbelow(2**31)
-        await set_flow(state,Flow.staff,"staffid",request_id=request_id)
-        button=KeyboardButton(text="Выбрать сотрудника",request_users=KeyboardButtonRequestUsers(
-            request_id=request_id,user_is_bot=False,max_quantity=1))
-        await message.answer("Введи числовой Telegram ID или выбери человека кнопкой. /cancel — отмена.",
-            reply_markup=ReplyKeyboardMarkup(keyboard=[[button]],resize_keyboard=True,one_time_keyboard=True))
+        await request_person(message,state,Flow.staff,"staffid","Выбрать сотрудника")
     else:
         target=number(args[0],2**52-1)
         row=repo.employee(target)
@@ -83,11 +106,7 @@ async def step(message,state,repo,uid,data):
     if kind=="find":
         await listing(message,state,repo,uid,text[:200],0)
     elif kind=="staffid":
-        shared=message.users_shared
-        if shared and (shared.request_id!=data["request_id"] or len(shared.users)!=1):
-            raise CatalogError("Выбор пользователя устарел.")
-        target=shared.users[0].user_id if shared else number(text,2**52-1)
-        if target<=0:raise CatalogError("Введи положительный Telegram ID.")
+        target=person_id(message,data)
         if repo.is_admin(target):raise CatalogError("Доступ предоставлен административной ролью.")
         row=repo.employee(target)
         if row:

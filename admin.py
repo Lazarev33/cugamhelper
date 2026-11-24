@@ -181,8 +181,7 @@ async def admin_action(message, state, guard, repo, uid, action, args):
         await tell(message, "\n".join(lines) or "Журнал пока пуст.", keys(("Назад", "ad:home")))
     elif action in {"grant", "revoke"} and uid == repo.owner:
         if action == "grant" and not args:
-            await set_flow(state, Flow.grant, "grant")
-            await tell(message, "Введи числовой Telegram user ID.", keys(CANCEL))
+            await employees.request_person(message, state, Flow.grant, "grant", "Выбрать администратора")
         elif action == "revoke" and len(args) == 1:
             target = number(args[0], 2**52-1)
             employee = repo.employee(target)
@@ -334,10 +333,10 @@ async def form_text(message, state, guard, repo, uid, data, stage):
     elif stage == Flow.value.state and message.text is not None:
         value = validate_value(message.text)
         await preview(message, state, guard, repo, data, data["name"], value)
-    elif stage == Flow.grant.state and message.text is not None:
+    elif stage == Flow.grant.state:
         if uid != repo.owner:
             raise CatalogDenied("Управлять правами может только владелец.")
-        await confirmation(message, state, "grant", target=number(message.text, 2**52-1))
+        await confirmation(message, state, "grant", target=employees.person_id(message, data))
     else:
         hints = {Flow.photo.state: SCAN_PROMPT, Flow.choose.state: "Выбери значение под результатом сканирования.",
                  Flow.confirm.state: "Используй кнопки под предпросмотром или подтверждением."}

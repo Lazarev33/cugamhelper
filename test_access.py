@@ -133,3 +133,21 @@ class AccessTests(TelegramCase):
         self.repo.set_admin(42,1000,False)
         self.assertTrue(self.repo.allowed(1000))
         self.assertFalse(self.repo.is_admin(1000))
+
+    async def test_admin_picker_and_contact(self):
+        for target in (81,82):
+            await self.click("ad:grant")
+            picker=self.session.requests[-1].reply_markup.keyboard[0][0]
+            self.assertEqual(picker.text,"Выбрать администратора")
+            payload={"users_shared":{"request_id":picker.request_users.request_id,"users":[{"user_id":target}]}} if target==81 else {"contact":{"first_name":"Тест","phone_number":"000","user_id":target}}
+            await self.feed(message={"message_id":3,"date":1,"chat":CHAT,"from":USER,**payload})
+            self.assertFalse(self.repo.is_admin(target))
+            self.assertIn(str(target),self.session.requests[-1].text)
+            await self.click(self.buttons()["Подтвердить"])
+            self.assertTrue(self.repo.is_admin(target))
+
+    async def test_contact_without_id(self):
+        await self.click("ad:grant")
+        await self.feed(message={"message_id":3,"date":1,"chat":CHAT,"from":USER,
+                                 "contact":{"first_name":"Тест","phone_number":"000"}})
+        self.assertIn("только номер телефона",self.session.requests[-1].text)
