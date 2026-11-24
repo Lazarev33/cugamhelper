@@ -78,7 +78,7 @@ class TelegramCase(unittest.IsolatedAsyncioTestCase):
         self.session.middleware.register(self.guard.outgoing)
 
     async def settle(self):
-        pools = (self.guard.heavy, self.guard.light, self.guard.edits)
+        pools = self.guard.pools
         while tasks := set().union(*(pool.tasks for pool in pools)):
             await asyncio.gather(*tasks, return_exceptions=True)
             await asyncio.sleep(0)

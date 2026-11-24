@@ -31,3 +31,4 @@ warehouse_bot.py
 test_warehouse.py
 employees.py
 test_access.py
+test_stability.py

@@ -103,7 +103,7 @@ async def restrict_updates(handler, event: Update, data: dict):
         return
     if not data["repo"].allowed(user.id):
         if not query and not user.is_bot and message.text and message.text.split(maxsplit=1)[:1] == ["/start"]:
-            data["repo"].remember_start(user.id,user.full_name,user.username)
+            guard.remember_visitor(data["repo"], user)
         if query:
             await query.answer()
         return
@@ -120,12 +120,18 @@ async def restrict_updates(handler, event: Update, data: dict):
             guard.handlers.pop(user.id, None)
 
 
-def queue_menu(message: Message, guard: Protection, title: str, keyboard: InlineKeyboardBuilder) -> None:
+def queue_menu(message: Message, guard: Protection, title: str, keyboard: InlineKeyboardBuilder,
+               *, dialog=None, priority=False) -> None:
     uid = message.from_user.id
     state = guard.state(uid)
     if state is None or guard.busy(uid) or guard.remaining(state, "command"):
         return
-    if guard.light.submit(uid, lambda: message.answer(title, reply_markup=keyboard.as_markup())):
+    async def show():
+        if dialog is not None:
+            await dialog.clear()
+        await message.answer(title, reply_markup=keyboard.as_markup())
+
+    if guard.service(uid, show, priority=priority):
         guard.limit(state, "command", guard.settings.chat_interval)
 
 
@@ -137,14 +143,44 @@ async def my_id(message: Message, guard: Protection):
 @dp.message(CommandStart())
 @dp.message(Command("menu"))
 async def start(message: Message, guard: Protection, state: FSMContext, repo: Catalog) -> None:
-    await state.clear()
-    queue_menu(message, guard, MAIN_TEXT, menu_keys(repo.is_admin(message.from_user.id)))
+    uid = message.from_user.id
+    if ticket := guard.heavy.ticket(uid):
+        show_operation_menu(message, guard, uid, ticket)
+        return
+    queue_menu(message, guard, MAIN_TEXT, menu_keys(repo.is_admin(uid)), dialog=state, priority=repo.is_admin(uid))
 
 
 @dp.message(Command("help"))
 async def help_command(message: Message, guard: Protection, state: FSMContext) -> None:
-    await state.clear()
-    queue_menu(message, guard, HELP_TEXT, section_keys())
+    queue_menu(message, guard, HELP_TEXT, section_keys(), dialog=state)
+
+
+def show_operation_menu(message, guard, uid, ticket):
+    markup = keys(
+        ("Продолжить операцию", f"work:keep:{ticket}"),
+        ("Отменить и открыть меню", f"work:menu:{ticket}"),
+    )
+    async def show():
+        if guard.heavy.ticket(uid) == ticket:
+            await message.answer("Операция ещё выполняется. Что сделать?", reply_markup=markup)
+    return guard.service(uid, show, control=True)
+
+
+@dp.callback_query(F.data.startswith("work:"))
+async def operation_navigation(query: CallbackQuery, guard: Protection, state: FSMContext, repo: Catalog):
+    uid = query.from_user.id
+    _, action, ticket = (query.data.split(":") + ["", ""])[:3]
+    if ticket != guard.heavy.ticket(uid) or action not in {"keep", "menu"}:
+        await query.answer("Операция уже завершилась. Открой /menu.")
+        return
+    if action == "keep":
+        await query.answer("Операция продолжается.")
+        return
+    await guard.cancel_operation(uid, state)
+    await query.answer("Операция отменена.")
+    if isinstance(query.message, Message):
+        guard.service(uid, lambda: query.message.answer(MAIN_TEXT, reply_markup=menu_keys(repo.is_admin(uid)).as_markup()),
+                      priority=True, essential=True)
 
 
 @dp.callback_query(F.data.in_({
@@ -158,8 +194,15 @@ async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state
         text = "Меню устарело. Открой /menu." if runtime and guard.warning(runtime, "stale", 2) else None
         await query.answer(text, show_alert=False)
         return
+    if query.data in {"menu:main", "menu:back"} and (ticket := guard.heavy.ticket(uid)):
+        offered = show_operation_menu(message, guard, uid, ticket)
+        await query.answer(None if offered else "Операция ещё выполняется.")
+        return
+    if guard.heavy.ticket(uid):
+        await query.answer("Операция ещё выполняется.")
+        return
     await query.answer()
-    if runtime is None:
+    if runtime is None or guard.heavy.ticket(uid):
         return
     await state.clear()
     screen = "menu:main" if query.data == "menu:back" else query.data
@@ -200,14 +243,14 @@ async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state
                     "message to edit not found", "no text in the message",
                 )):
                     if not guard.busy(uid):
-                        guard.light.submit(uid, show)
+                        guard.service(uid, show, priority=repo.is_admin(uid))
                     return
                 raise
         remember_screen(runtime, message.message_id, screen_key)
 
     if message.text is None:
         if not guard.busy(uid):
-            guard.light.submit(uid, show)
+            guard.service(uid, show, priority=repo.is_admin(uid))
     else:
         guard.edits.submit(uid, edit)
 
@@ -302,21 +345,21 @@ async def clean_input(message, guard, uid, text):
     state = guard.state(uid)
     if state is None:
         return
-    remaining = guard.remaining(state, "clean")
+    remaining = guard.remaining(state, "heavy")
     if guard.busy(uid):
         guard.note("параллельная операция одного пользователя")
         return
     if remaining:
         guard.note("частый запрос очистки")
         if guard.warning(state, "clean", guard.settings.warning_interval):
-            guard.light.submit(uid, lambda: send_plain(message, f"Слишком частые запросы. Подожди {remaining} сек."))
+            guard.service(uid, lambda: send_plain(message, f"Слишком частые запросы. Подожди {remaining} сек."))
         return
     if guard.heavy.submit(uid, lambda: process_numbers(message, text, guard)):
-        guard.limit(state, "clean", guard.settings.clean_cooldown)
+        guard.limit(state, "heavy", guard.settings.clean_cooldown)
     else:
         guard.note("очередь тяжёлых операций заполнена")
         if guard.warning(state, "clean", guard.settings.warning_interval):
-            guard.light.submit(uid, lambda: send_plain(message, "Бот занят. Попробуй чуть позже."))
+            guard.service(uid, lambda: send_plain(message, "Бот занят. Попробуй чуть позже."))
 
 async def process_numbers(message: Message, text: str, guard: Protection) -> None:
     settings = guard.settings

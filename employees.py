@@ -1,6 +1,7 @@
 """Экраны Telegram для сотрудников. Все изменения завершаются транзакцией каталога."""
 from aiogram.types import KeyboardButton, KeyboardButtonRequestUsers, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from secrets import randbelow
+from protection import remember
 from catalog import CatalogError, PAGE_SIZE
 
 
@@ -32,8 +33,8 @@ def person_id(message, data):
     return target
 
 
-async def screen(message, state, repo, uid, action, args):
-    from admin import Flow, set_flow, keys, tell, number, CANCEL
+async def screen(message, state, guard, repo, uid, action, args):
+    from admin import Flow, set_flow, keys, tell, number, cancel_button
     repo.require_admin(uid)
     back=("Назад","ad:staff")
     if action=="staff":
@@ -59,10 +60,19 @@ async def screen(message, state, repo, uid, action, args):
         await confirm(message,state,target=target,change="restore" if employee else "give",
                       name=label,note=note,revision=employee["revision"] if employee else 0)
     elif action=="stafflist":
-        await listing(message,state,repo,uid,"",number(args[0],1000000))
+        await listing(message,state,guard,repo,uid,"",number(args[0],1000000))
+    elif action=="staffview":
+        runtime = guard.state(uid)
+        view = runtime.staff_views.get(args[0]) if runtime else None
+        if view is None:
+            raise CatalogError("Список устарел. Открой список сотрудников или поиск.")
+        query, page = view
+        if len(args) == 2:
+            page = number(args[1], 1_000_000)
+        await listing(message, state, guard, repo, uid, query, page)
     elif action=="staffsearch":
         await set_flow(state,Flow.staff,"find")
-        await tell(message,"Введи ID, имя или часть примечания.",keys(CANCEL))
+        await tell(message,"Введи ID, имя или часть примечания.",keys(await cancel_button(state)))
     elif action=="staffadd":
         await request_person(message,state,Flow.staff,"staffid","Выбрать сотрудника")
     else:
@@ -72,56 +82,66 @@ async def screen(message, state, repo, uid, action, args):
         suffix=f"{target}:{row['revision']}"
         label=row["display_name"] or "Без имени"
         if action=="staffcard":
+            view = f":{args[1]}" if len(args) == 2 else ""
+            if len(args) == 2:
+                back = ("Назад", f"ad:staffview:{args[1]}")
             flag="допущен" if row["active"] else "отключён"
             await tell(message,f"{label}\nTelegram ID: {target}\nСтатус: {flag}\nДобавлен: {row['created_at']} UTC"
                        f"\nКем: {row['created_by'] or 'импорт'}\nПримечание: {row['note'] or '—'}",
-                       keys(("Изменить имя",f"ad:staffname:{suffix}"),("Изменить примечание",f"ad:staffnote:{suffix}"),
+                       keys(("Изменить имя",f"ad:staffname:{suffix}{view}"),("Изменить примечание",f"ad:staffnote:{suffix}{view}"),
                             ("Отозвать доступ" if row["active"] else "Восстановить доступ",
-                             f"ad:staff{'disable' if row['active'] else 'restore'}:{suffix}"),back))
-        elif action in {"staffname","staffnote","staffdisable","staffrestore"} and len(args)==2:
+                             f"ad:staff{'disable' if row['active'] else 'restore'}:{suffix}{view}"),back))
+        elif action in {"staffname","staffnote","staffdisable","staffrestore"} and len(args) in (2, 3):
             if number(args[1])!=row["revision"]:raise CatalogError("Карточка устарела.")
             change=action[5:]
             params=dict(target=target,revision=row["revision"],change=change)
+            if len(args) == 3:
+                params["view"] = args[2]
             if change in {"name","note"}:
                 await set_flow(state,Flow.staff,"staffedit",**params)
-                await tell(message,"Введи новое значение. Для очистки отправь «-».",keys(CANCEL))
+                await tell(message,"Введи новое значение. Для очистки отправь «-».",keys(await cancel_button(state)))
             else:
                 await confirm(message,state,**params,name=label)
         else:raise CatalogError("Кнопка устарела.")
 
 
-async def listing(message,state,repo,uid,query,page):
-    from admin import Flow,set_flow,keys,tell
+async def listing(message, state, guard, repo, uid, query, page):
+    from admin import keys, tell
     repo.require_admin(uid)
-    rows=repo.employees(query,page)
-    await set_flow(state,Flow.staff,"staffresults",query=query)
-    nonce=(await state.get_data())["nonce"]
-    buttons=[(f"{'✓' if r['active'] else '○'} {r['display_name'] or 'Сотрудник'} · {r['user_id']}",
-              f"ad:staffcard:{r['user_id']}") for r in rows[:PAGE_SIZE]]
-    if page:buttons.append(("‹ Ранее",f"flow:staffpage:{nonce}:{page-1}"))
-    if len(rows)>PAGE_SIZE:buttons.append(("Далее ›",f"flow:staffpage:{nonce}:{page+1}"))
-    await tell(message,f"Сотрудники · страница {page+1}" if rows else "Сотрудники не найдены.",
-               keys(*buttons,("Назад","ad:staff")))
+    await state.clear()
+    runtime = guard.state(uid)
+    if runtime is None:
+        return
+    rows = repo.employees(query, page)
+    token = remember(runtime.staff_views, (query, page))
+    buttons = [(f"{'✓' if r['active'] else '○'} {r['display_name'] or 'Сотрудник'} · {r['user_id']}",
+                f"ad:staffcard:{r['user_id']}:{token}") for r in rows[:PAGE_SIZE]]
+    if page:
+        buttons.append(("‹ Ранее", f"ad:staffview:{token}:{page-1}"))
+    if len(rows) > PAGE_SIZE:
+        buttons.append(("Далее ›", f"ad:staffview:{token}:{page+1}"))
+    await tell(message, f"Сотрудники · страница {page+1}" if rows else "Сотрудники не найдены.",
+               keys(*buttons, ("Назад", "ad:staff")))
 
 
 async def confirm(message,state,**params):
-    from admin import Flow,set_flow,keys,tell,CANCEL
+    from admin import Flow,set_flow,keys,tell,cancel_button
     labels={"give":"Предоставить доступ","disable":"Отозвать доступ","restore":"Восстановить доступ",
             "name":"Сохранить имя","note":"Сохранить примечание"}
     label=labels[params["change"]]
     await set_flow(state,Flow.confirm,"employee",**params)
     nonce=(await state.get_data())["nonce"]
     await tell(message,f"{label}?\nTelegram ID: {params['target']}\nИмя: {params.get('name') or '—'}"
-               f"\nПримечание: {params.get('note') or '—'}",keys((label,f"flow:ok:{nonce}"),CANCEL))
+               f"\nПримечание: {params.get('note') or '—'}",keys((label,f"flow:ok:{nonce}"),await cancel_button(state)))
 
 
-async def step(message,state,repo,uid,data):
-    from admin import Flow,set_flow,keys,tell,number,CANCEL
+async def step(message,state,guard,repo,uid,data):
+    from admin import Flow, set_flow, keys, tell
     repo.require_admin(uid)
     kind=data["kind"]
     text=message.text or ""
     if kind=="find":
-        await listing(message,state,repo,uid,text[:200],0)
+        await listing(message,state,guard,repo,uid,text[:200],0)
     elif kind=="staffid":
         target=person_id(message,data)
         if repo.is_admin(target):raise CatalogError("Доступ предоставлен административной ролью.")
@@ -141,5 +161,6 @@ async def step(message,state,repo,uid,data):
     elif kind=="staffedit":
         change=data["change"]
         await confirm(message,state,target=data["target"],revision=data["revision"],change=change,
+                      view=data.get("view"),
                       **{change:"" if text=="-" else text})
     else:raise CatalogError("Выбери сотрудника кнопкой.")

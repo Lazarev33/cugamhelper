@@ -232,12 +232,13 @@ class Catalog:
         now = int(time.time())
         row = self.db.execute("SELECT seen FROM start_visitors WHERE user_id=?", (uid,)).fetchone()
         if row and now-row[0]<60:
-            return
+            return False
         with self.transaction():
             self.db.execute("INSERT OR REPLACE INTO start_visitors VALUES(?,?,?,?)",
                             (uid,name[:160],username or "",now))
             self.db.execute("""DELETE FROM start_visitors WHERE user_id IN
                 (SELECT user_id FROM start_visitors ORDER BY seen DESC,user_id DESC LIMIT -1 OFFSET 500)""")
+        return True
 
     def visitors(self, actor, page):
         self.require_admin(actor)

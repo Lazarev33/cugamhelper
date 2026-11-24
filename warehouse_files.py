@@ -4,6 +4,7 @@ from base64 import b64decode, b64encode
 from copy import copy, deepcopy
 from io import BytesIO
 import re
+from urllib.parse import urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 from lxml import etree
 from openpyxl import load_workbook
@@ -28,17 +29,30 @@ class MemoryExcelWriter(ExcelWriter):
         self.manifest.append(worksheet)
 
 
-def inspect_zip(raw):
+def inspect_zip(raw, *, xlsx=False):
     with ZipFile(BytesIO(raw)) as z:
         files = z.infolist()
         if len(files)>300 or sum(f.file_size for f in files)>16*1024**2 or len(set(z.namelist()))!=len(files):
             raise ValueError("Слишком большой или неоднозначный архив.")
         for f in files:
             name = f.filename.lower()
+            if xlsx and name.startswith((
+                "xl/drawings/drawing", "xl/pivotcache/", "xl/pivottables/", "xl/slicers/",
+                "xl/threadedcomments/", "xl/embeddings/",
+            )):
+                raise ValueError("Сохрани простую копию XLSX без сложных объектов.")
             if name.endswith((".xml",".rels")):
                 root = etree.fromstring(z.read(f), etree.XMLParser(resolve_entities=False, no_network=True))
-                if root.getroottree().docinfo.doctype or any(e.get("TargetMode")=="External" for e in root.iter()):
+                if root.getroottree().docinfo.doctype:
                     raise ValueError("Документ содержит внешние ссылки или DTD.")
+                for relation in root.iter():
+                    if relation.get("TargetMode") != "External":
+                        continue
+                    target = relation.get("Target", "")
+                    if not (xlsx and name.endswith(".rels") and
+                            relation.get("Type") == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" and
+                            urlsplit(target).scheme in {"http", "https", "mailto"}):
+                        raise ValueError("Документ содержит неподдерживаемые внешние ссылки.")
             elif name.endswith(".bin"):
                 raise ValueError("Встроенные программы не поддерживаются.")
 
@@ -57,6 +71,29 @@ def identifier(cell):
     raise ValueError("Используй текстовые идентификаторы или целые числа с простым форматом.")
 
 
+def cell_record(cell):
+    link = cell.hyperlink
+    comment = cell.comment
+    return (
+        cell.value, cell.data_type if cell.value is not None else None,
+        tuple(cell._style) if cell.has_style else None,
+        (comment.text, comment.author) if comment else None,
+        (link.target, link.location, link.display, link.tooltip) if link else None,
+    )
+
+
+def place_cell(target, source):
+    target._hyperlink = copy(source.hyperlink) if source else None
+    if target.hyperlink:
+        target.hyperlink.ref = target.coordinate
+        target.hyperlink.id = None
+    target.comment = copy(source.comment) if source else None
+    target._style = copy(source._style) if source else None
+    target.value = source.value if source else None
+    if source:
+        target.data_type = source.data_type
+
+
 class Source:
     def __init__(self, item, opts, mode, limit):
         self.kind = item["kind"]
@@ -66,9 +103,9 @@ class Source:
         self.groups = []
         self.positions = []
         if self.kind in {"xlsx","docx"}:
-            inspect_zip(raw)
+            inspect_zip(raw, xlsx=self.kind == "xlsx")
         if self.kind=="xlsx":
-            self.book = load_workbook(BytesIO(raw))
+            self.book = load_workbook(BytesIO(raw), rich_text=True)
             if len(self.book.worksheets)>16 or any(s.max_column*s.max_row>50000 for s in self.book.worksheets):
                 raise ValueError("Превышен размер таблицы.")
             if len(self.book.worksheets)>1 and "sheet" not in opts:
@@ -120,9 +157,16 @@ class Source:
                     val=identifier(row[col]) if self.kind=="xlsx" else row[col].text
                     if val not in (None,""):
                         group.append(val);positions.append(i)
-                    elif mode!="align" and any((c.value if self.kind=="xlsx" else c.text) not in (None,"") for c in row):
+                    elif mode!="align" and any(
+                        (c.value not in (None, "") or c.comment or c.hyperlink) if self.kind == "xlsx" else c.text
+                        for c in row
+                    ):
                         raise ValueError("В заполненной строке отсутствует ключ сортировки.")
-                    elif mode=="align" and col==self.b and any((row[j].value if self.kind=="xlsx" else row[j].text) not in (None,"") for j in self.link):
+                    elif mode=="align" and col==self.b and any(
+                        ((j != self.b and row[j].value not in (None, "")) or row[j].comment or row[j].hyperlink)
+                        if self.kind == "xlsx" else (j != self.b and row[j].text)
+                        for j in [col, *self.link]
+                    ):
                         raise ValueError("У связанных данных отсутствует идентификатор.")
                 self.groups.append(group);self.positions.append(positions)
         else:
@@ -133,6 +177,7 @@ class Source:
             raise ValueError("Пустой список или превышен предел строк.")
 
     def output(self, orders, align=False):
+        expected_cells = {}
         lists=[[group[i] for i in ix] for group,ix in zip(self.groups,orders)]
         if not self.table:
             if self.kind=="text": return lists
@@ -160,12 +205,14 @@ class Source:
                 moves={dest:self.positions[0][i] for dest,i in zip(self.positions[0],orders[0])}
             if self.kind=="xlsx":
                 saved={(i,c):copy(self.rows[i][c]) for i in set(moves.values()) for c in cols}
-                for i in range(self.start,max([len(self.rows)-1,*moves])+1):
+                destinations = (set(self.positions[1]) | moves.keys()
+                                if align else self.positions[0])
+                for i in destinations:
                     for c in cols:
                         cell=self.sheet.cell(i+1,c+1)
-                        if i in moves:
-                            old=saved[moves[i],c];cell.value=old.value;cell.data_type=old.data_type;cell._style=copy(old._style)
-                        else: cell.value=None
+                        source = saved[moves[i], c] if i in moves else None
+                        expected_cells[i+1, c+1] = cell_record(source) if source else (None,)*5
+                        place_cell(cell, source)
             else:
                 saved={(i,c):deepcopy(self.rows[i][c]._tc) for i in set(moves.values()) for c in cols}
                 for i in range(self.start,max([len(self.rows)-1,*moves])+1):
@@ -182,7 +229,11 @@ class Source:
             self.book.save(stream)
         if self.table:
             if self.kind=="xlsx":
-                reopened=load_workbook(BytesIO(stream.getvalue()))[self.sheet.title]
+                reopened=load_workbook(BytesIO(stream.getvalue()), rich_text=True)[self.sheet.title]
+                for position, record in expected_cells.items():
+                    cell = reopened.cell(*position)
+                    if cell_record(cell) != record or cell.hyperlink and cell.hyperlink.ref != cell.coordinate:
+                        raise ValueError("Контрольное чтение XLSX обнаружило изменение атрибутов записи.")
                 rows=list(reopened.rows)
                 read=identifier
             else:

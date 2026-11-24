@@ -21,7 +21,6 @@ from catalog import Barcode, CatalogDenied, CatalogError, DuplicateBarcode, vali
 from scanner import ScanError, scan_telegram
 
 PANEL = "Админ-панель"
-CANCEL = ("Отмена", "flow:cancel")
 CODE_UNSUPPORTED = "Сохранить можно обычный Code 128 с допустимым значением."
 SCAN_PROMPT = "Пришли фото штрихкода или изображение JPEG, PNG или WebP."
 SCAN_FAILED = "Штрихкод не прочитан. Приблизь код, избегай бликов и пришли фото ещё раз или отправь оригинал как файл."
@@ -94,6 +93,11 @@ async def set_flow(state, stage, kind, **data):
     await state.set_state(stage)
 
 
+async def cancel_button(state):
+    nonce = (await state.get_data()).get("nonce")
+    return ("Отмена", f"flow:cancel:{nonce}") if nonce else ("Главное меню", "menu:main")
+
+
 async def panel(message):
     markup = keys(
         ("Каталог ШК", "ad:list:0"), ("Добавить вручную", "ad:manual"), ("Добавить по фото", "ad:scan"),
@@ -119,27 +123,27 @@ async def card(message, record: Barcode):
     ))
 
 
-async def duplicate_notice(message, error):
+async def duplicate_notice(message, state, error):
     record = error.record
     status = "активен" if record.active else "выключен"
     buttons = [("Открыть существующий ШК", f"ad:open:{record.id}")]
     if not record.active:
         buttons.append(("Восстановить ШК", f"ad:toggle:{record.id}:{record.revision}"))
     await tell(message, f"{error}\n#{record.id} · {record.name}\n{record.format}: «{record.value}»\nСтатус: {status}",
-               keys(*buttons, CANCEL))
+               keys(*buttons, await cancel_button(state)))
 
 
 async def preview(message, state, guard, repo, data, name, value):
     old = data.get("old")
     duplicate = repo.by_value(value)
     if duplicate and (old is None or duplicate.id != old.id):
-        await duplicate_notice(message, DuplicateBarcode(duplicate))
+        await duplicate_notice(message, state, DuplicateBarcode(duplicate))
         return
     await set_flow(state, Flow.confirm, "save", old=old, name=name, value=value, origin=data["kind"])
     nonce = (await state.get_data())["nonce"]
     comparison = f"\nБыло: «{old.value}»\nБудет: «{value}»" if old and old.value != value else f"\nCode 128: «{value}»"
     await send_png(message, name, value, guard, keys(
-        ("Сохранить", f"flow:ok:{nonce}"), ("Изменить", f"flow:change:{nonce}"), CANCEL,
+        ("Сохранить", f"flow:ok:{nonce}"), ("Изменить", f"flow:change:{nonce}"), await cancel_button(state),
     ), caption=f"Предпросмотр · {name}{comparison}")
 
 
@@ -151,7 +155,7 @@ async def admin_action(message, state, guard, repo, uid, action, args):
     if action == "home" and not args:
         await panel(message)
     elif action.startswith("staff"):
-        await employees.screen(message,state,repo,uid,action,args)
+        await employees.screen(message,state,guard,repo,uid,action,args)
     elif action == "list" and len(args) == 1:
         page = number(args[0], 1_000_000)
         records, more = repo.page(page)
@@ -162,10 +166,10 @@ async def admin_action(message, state, guard, repo, uid, action, args):
     elif action in {"manual", "scan"} and not args:
         if action == "manual":
             await set_flow(state, Flow.name, "manual")
-            await tell(message, "Введи название кнопки.", keys(CANCEL))
+            await tell(message, "Введи название кнопки.", keys(await cancel_button(state)))
         else:
             await set_flow(state, Flow.photo, "add_photo")
-            await tell(message, SCAN_PROMPT, keys(CANCEL))
+            await tell(message, SCAN_PROMPT, keys(await cancel_button(state)))
     elif action == "roles" and len(args) == 1:
         page = number(args[0], 1_000_000)
         admins, more = repo.admins(page)
@@ -207,7 +211,7 @@ async def record_action(message, state, guard, repo, action, args, uid):
     elif action in {"rename", "value"}:
         await set_flow(state, Flow.name if action == "rename" else Flow.value, action, old=record, name=record.name)
         prompt = "Введи новое название кнопки." if action == "rename" else f"Текущее значение: {record.value}\nВведи новое значение."
-        await tell(message, prompt, keys(CANCEL))
+        await tell(message, prompt, keys(await cancel_button(state)))
     elif record.revision != number(args[1]):
         raise CatalogError("Запись изменилась. Открой её заново.")
     elif action == "delete":
@@ -227,7 +231,7 @@ async def confirmation(message, state, kind, **data):
         prompt = f"{action} для Telegram ID {data['target']}?"
         if kind == "revoke":
             prompt += "\n" + data["remaining"]
-    await tell(message, prompt, keys(("Подтвердить", f"flow:ok:{nonce}"), CANCEL))
+    await tell(message, prompt, keys(("Подтвердить", f"flow:ok:{nonce}"), await cancel_button(state)))
 
 
 async def apply_flow(message, state, guard, repo, uid, action, args):
@@ -238,9 +242,7 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
     if kind != "scan":
         repo.require_admin(uid)
     stage = await state.get_state()
-    if action=="staffpage" and kind=="staffresults" and len(args)==2:
-        await employees.listing(message,state,repo,uid,data["query"],number(args[1],1000000))
-    elif action == "pick" and stage == Flow.choose.state and len(args) == 2:
+    if action == "pick" and stage == Flow.choose.state and len(args) == 2:
         index = number(args[1], 15)
         if index >= len(data["codes"]):
             raise CatalogError("Выбери код из списка.")
@@ -253,7 +255,7 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
         old = data["old"]
         await set_flow(state, Flow.name if origin in {"rename", "add_photo", "manual"} else Flow.value, origin,
                        old=old, name=data["name"], value=data["value"])
-        await tell(message, "Введи название кнопки." if origin != "value" else "Введи новое значение.", keys(CANCEL))
+        await tell(message, "Введи название кнопки." if origin != "value" else "Введи новое значение.", keys(await cancel_button(state)))
     elif action == "ok" and stage == Flow.confirm.state and len(args) == 1:
         if kind == "employee":
             target=data["target"]
@@ -262,7 +264,8 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
                 guard.revoke(target)
                 await FSMContext(state.storage,replace(state.key,chat_id=target,user_id=target)).clear()
             await state.clear()
-            await tell(message,"Изменение сохранено.",keys(("Карточка сотрудника",f"ad:staffcard:{target}")))
+            view = f":{data['view']}" if data.get("view") else ""
+            await tell(message,"Изменение сохранено.",keys(("Карточка сотрудника",f"ad:staffcard:{target}{view}")))
         elif kind == "save":
             record = repo.save(uid, data["name"], data["value"], data["old"])
             await state.clear()
@@ -297,19 +300,20 @@ async def show_detected(message, state, repo, uid, kind, code):
             existing = repo.by_value(code.value)
             if existing:
                 await set_flow(state, Flow.photo, kind)
-                await duplicate_notice(message, DuplicateBarcode(existing))
+                await duplicate_notice(message, state, DuplicateBarcode(existing))
                 return
             await set_flow(state, Flow.name, kind, value=code.value)
-            await tell(message, f"Формат: {code.format}\nЗначение: {code.value}\nВведи название кнопки.", keys(CANCEL))
+            await tell(message, f"Формат: {code.format}\nЗначение: {code.value}\nВведи название кнопки.", keys(await cancel_button(state)))
             return
 
-    buttons = [CANCEL]
+    buttons = []
     if kind == "scan" and code.addable and repo.is_admin(uid):
         await set_flow(state, Flow.photo, kind, decoded=code)
         nonce = (await state.get_data())["nonce"]
-        buttons.insert(0, ("Добавить в каталог", f"flow:add:{nonce}"))
+        buttons.append(("Добавить в каталог", f"flow:add:{nonce}"))
     else:
         await set_flow(state, Flow.photo, kind)
+    buttons.append(await cancel_button(state))
     value = "".join(char if char.isprintable() or char in "\n\t" else f"\\u{ord(char):04x}" for char in code.value)
     text = f"Формат: {code.format}\nЗначение:\n{value}"
     if kind == "add_photo":
@@ -323,7 +327,7 @@ async def form_text(message, state, guard, repo, uid, data, stage):
     if kind != "scan":
         repo.require_admin(uid)
     if stage == Flow.staff.state:
-        await employees.step(message,state,repo,uid,data)
+        await employees.step(message,state,guard,repo,uid,data)
     elif stage == Flow.name.state and message.text is not None:
         name = validate_name(message.text)
         old = data.get("old")
@@ -331,7 +335,7 @@ async def form_text(message, state, guard, repo, uid, data, stage):
             await preview(message, state, guard, repo, data, name, old.value if old else data["value"])
         else:
             await set_flow(state, Flow.value, kind, name=name)
-            await tell(message, "Введи значение Code 128. Регистр, пробелы и ведущие нули сохраняются.", keys(CANCEL))
+            await tell(message, "Введи значение Code 128. Регистр, пробелы и ведущие нули сохраняются.", keys(await cancel_button(state)))
     elif stage == Flow.value.state and message.text is not None:
         value = validate_value(message.text)
         await preview(message, state, guard, repo, data, data["name"], value)
@@ -342,7 +346,7 @@ async def form_text(message, state, guard, repo, uid, data, stage):
     else:
         hints = {Flow.photo.state: SCAN_PROMPT, Flow.choose.state: "Выбери значение под результатом сканирования.",
                  Flow.confirm.state: "Используй кнопки под предпросмотром или подтверждением."}
-        await tell(message, hints.get(stage, "Отправь текст для текущего шага."), keys(CANCEL))
+        await tell(message, hints.get(stage, "Отправь текст для текущего шага."), keys(await cancel_button(state)))
 
 
 def register(dispatcher):
@@ -355,9 +359,9 @@ def register(dispatcher):
             await state.clear()
             await tell(message, str(error))
         except DuplicateBarcode as error:
-            await duplicate_notice(message, error)
+            await duplicate_notice(message, state, error)
         except ValueError as error:
-            await tell(message, str(error), keys(CANCEL, ("Панель", "ad:home")))
+            await tell(message, str(error), keys(await cancel_button(state), ("Панель", "ad:home")))
         except sqlite3.Error:
             await tell(message, "Каталог временно недоступен. Повтори действие.")
 
@@ -365,8 +369,9 @@ def register(dispatcher):
     async def commands(message: Message, state: FSMContext, guard, repo, command):
         uid = message.from_user.id
         if command.command == "cancel":
-            await state.clear()
-            guard.light.submit(uid, lambda: tell(message, "Действие отменено.", keys(("Главное меню", "menu:main"))))
+            await guard.cancel_operation(uid, state)
+            guard.service(uid, lambda: tell(message, "Действие отменено.", keys(("Главное меню", "menu:main"))),
+                          priority=True, essential=True)
             return
         if guard.state(uid) is None or guard.busy(uid):
             return
@@ -378,9 +383,9 @@ def register(dispatcher):
                 await panel(message)
             else:
                 await set_flow(state, Flow.photo, "scan")
-                await tell(message, SCAN_PROMPT, keys(CANCEL))
+                await tell(message, SCAN_PROMPT, keys(await cancel_button(state)))
 
-        guard.light.submit(uid, lambda: safe(message, state, run))
+        guard.service(uid, lambda: safe(message, state, run), priority=repo.is_admin(uid))
 
     @dispatcher.callback_query(F.data.startswith(("ad:", "flow:")) | (F.data == "scan:start"))
     async def callback(query, state: FSMContext, guard, repo):
@@ -392,10 +397,15 @@ def register(dispatcher):
         if query.data.startswith("ad:") and not repo.is_admin(uid):
             await query.answer("Доступ закрыт.", show_alert=False)
             return
-        if query.data == "flow:cancel":
-            await state.clear()
+        if query.data == "flow:cancel" or query.data.startswith("flow:cancel:"):
+            nonce = (await state.get_data()).get("nonce")
+            if not nonce or query.data != f"flow:cancel:{nonce}":
+                await query.answer("Кнопка отмены устарела.")
+                return
+            await guard.cancel_operation(uid, state)
             await query.answer("Действие отменено.")
-            guard.light.submit(uid, lambda: tell(message, "Действие отменено.", keys(("Главное меню", "menu:main"))))
+            guard.service(uid, lambda: tell(message, "Действие отменено.", keys(("Главное меню", "menu:main"))),
+                          priority=True, essential=True)
             return
         if guard.state(uid) is None or guard.busy(uid):
             await query.answer()
@@ -418,7 +428,7 @@ def register(dispatcher):
                 await admin_action(message, state, guard, repo, uid, action, args)
             elif namespace == "scan":
                 await set_flow(state, Flow.photo, "scan")
-                await tell(message, SCAN_PROMPT, keys(CANCEL))
+                await tell(message, SCAN_PROMPT, keys(await cancel_button(state)))
             else:
                 await apply_flow(message, state, guard, repo, uid, action, args)
 
@@ -432,7 +442,7 @@ def register(dispatcher):
             finally:
                 edit_target.reset(token)
 
-        if guard.light.submit(uid, show_screen):
+        if guard.service(uid, show_screen, priority=repo.is_admin(uid)):
             try:
                 await query.answer()
             finally:
@@ -454,23 +464,23 @@ def register(dispatcher):
         if stage == Flow.photo.state and media and (message.photo or (media.mime_type or "").startswith("image/")):
             await queue_scan(message, state, guard, repo, uid, data, media, user)
         else:
-            guard.light.submit(uid, lambda: safe(
+            guard.service(uid, lambda: safe(
                 message, state, lambda: form_text(message, state, guard, repo, uid, data, stage),
-            ))
+            ), priority=repo.is_admin(uid))
 
     async def queue_scan(message, state, guard, repo, uid, data, media, user):
         if data["kind"] == "add_photo" and not repo.is_admin(uid):
             await state.clear()
-            guard.light.submit(uid, lambda: tell(message, "Доступ к админ-панели закрыт."))
+            guard.service(uid, lambda: tell(message, "Доступ к админ-панели закрыт."))
             return
-        if guard.remaining(user, "scan"):
+        if guard.remaining(user, "heavy"):
             if guard.warning(user, "scan", guard.settings.warning_interval):
-                guard.light.submit(uid, lambda: tell(message, "Подожди перед повторным сканированием."))
+                guard.service(uid, lambda: tell(message, "Подожди перед повторным сканированием."))
             return
         guard.scans.intersection_update(guard.heavy.keys)
         if len(guard.scans) >= 2:
             if guard.warning(user, "scan", guard.settings.warning_interval):
-                guard.light.submit(uid, lambda: tell(message, "Сканер занят. Попробуй чуть позже."))
+                guard.service(uid, lambda: tell(message, "Сканер занят. Попробуй чуть позже."))
             return
 
         async def scan():
@@ -493,7 +503,7 @@ def register(dispatcher):
             if kind == "add_photo":
                 repo.require_admin(uid)
             if not codes:
-                await tell(message, problem, keys(CANCEL))
+                await tell(message, problem, keys(await cancel_button(state)))
             elif len(codes) == 1:
                 await show_detected(message, state, repo, uid, kind, codes[0])
             else:
@@ -504,10 +514,10 @@ def register(dispatcher):
                      f"flow:pick:{nonce}:{index}")
                     for index, code in enumerate(codes)
                 ]
-                await tell(message, f"Найдено кодов: {len(codes)}. Выбери нужный.", keys(*buttons, CANCEL))
+                await tell(message, f"Найдено кодов: {len(codes)}. Выбери нужный.", keys(*buttons, await cancel_button(state)))
 
         if guard.heavy.submit(uid, lambda: safe(message, state, scan)):
             guard.scans.add(uid)
-            guard.limit(user, "scan", guard.settings.clean_cooldown)
+            guard.limit(user, "heavy", guard.settings.clean_cooldown)
         elif guard.warning(user, "scan", guard.settings.warning_interval):
-            guard.light.submit(uid, lambda: tell(message, "Очередь заполнена. Попробуй чуть позже."))
+            guard.service(uid, lambda: tell(message, "Очередь заполнена. Попробуй чуть позже."))

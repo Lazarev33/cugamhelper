@@ -303,6 +303,7 @@ class AdminTests(TelegramCase):
         self.assertIsNone(self.repo.by_value("NewCode"))
         await self.send("/cancel", 43)
         await self.click("menu:clean", uid=43)
+        self.clock.now += 5
         await self.send("0001-21.11.2026", 43)
         self.assertEqual(self.session.requests[-1].text, "0001")
 

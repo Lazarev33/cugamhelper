@@ -5,15 +5,16 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 import logging
 from math import ceil
+from secrets import token_hex
 from time import monotonic
 
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendDocument, SendMessage, SendPhoto
+from aiogram.methods import AnswerCallbackQuery, EditMessageCaption, EditMessageText, SendDocument, SendMessage, SendPhoto
 
 from settings import Settings
 
 LOG = logging.getLogger(__name__)
-CHAT_REQUESTS = (SendMessage, SendPhoto, SendDocument, EditMessageText)
+CHAT_REQUESTS = (SendMessage, SendPhoto, SendDocument, EditMessageText, EditMessageCaption)
 
 
 class SendBudgetExceeded(TelegramAPIError):
@@ -108,64 +109,104 @@ class Outgoing:
                     raise
 
 
-class Jobs:
-    """Принимает ограниченное число работ без ожидания места в очереди."""
+@dataclass
+class WaitingJob:
+    operation: object
+    long: bool
+    timer: asyncio.TimerHandle | None = None
 
-    def __init__(self, parallel: int, waiting: int):
+
+class Jobs:
+    """Одна работа на пользователя, ограниченная очередь и резерв для коротких задач."""
+
+    def __init__(self, parallel: int, waiting: int, long_parallel: int | None = None):
         self.parallel = parallel
         self.waiting = waiting
-        self.queue = deque()
+        self.long_parallel = parallel if long_parallel is None else long_parallel
+        self.queue = OrderedDict()
         self.tasks = set()
         self.running = {}
         self.keys = set()
+        self.tickets = {}
+        self.long_running = set()
         self.closing = False
         self.log_after = 0.0
 
-    def submit(self, key, operation) -> bool:
+    def has_slot(self, long):
+        return len(self.tasks) < self.parallel and (not long or len(self.long_running) < self.long_parallel)
+
+    def submit(self, key, operation, *, long=False, expires=None, on_expire=None) -> bool:
         if self.closing or key in self.keys:
             return False
-        if len(self.tasks) >= self.parallel:
-            if len(self.queue) >= self.waiting:
-                return False
-            self.queue.append((key, operation))
-        else:
-            self.start(key, operation)
+        immediate = self.has_slot(long)
+        if not immediate and len(self.queue) >= self.waiting:
+            return False
         self.keys.add(key)
+        self.tickets[key] = token_hex(6)
+        if immediate:
+            self.start(key, operation, long)
+        else:
+            job = self.queue[key] = WaitingJob(operation, long)
+            if expires is not None:
+                job.timer = asyncio.get_running_loop().call_at(expires, self.expire, key, on_expire)
         return True
 
-    def start(self, key, operation) -> None:
+    def expire(self, key, on_expire):
+        if key in self.queue:
+            self.revoke(key)
+            if on_expire:
+                on_expire()
+
+    def start(self, key, operation, long) -> None:
         async def run():
             await operation()
 
         task = asyncio.create_task(run())
         self.tasks.add(task)
         self.running[key] = task
+        if long:
+            self.long_running.add(key)
         task.add_done_callback(lambda completed: self.finished(key, completed))
 
     def finished(self, key, task) -> None:
         self.running.pop(key, None)
         self.tasks.discard(task)
+        self.long_running.discard(key)
         self.keys.discard(key)
+        self.tickets.pop(key, None)
         if not task.cancelled() and (error := task.exception()):
             now = monotonic()
             if now >= self.log_after:
                 self.log_after = now + 15
                 LOG.warning("Операция Telegram завершилась ошибкой: %s", type(error).__name__)
-        if not self.closing and self.queue:
-            self.start(*self.queue.popleft())
+        if self.closing:
+            return
+        for waiting_key, job in self.queue.items():
+            if self.has_slot(job.long):
+                del self.queue[waiting_key]
+                if job.timer:
+                    job.timer.cancel()
+                self.start(waiting_key, job.operation, job.long)
+                break
+
+    def ticket(self, key):
+        return self.tickets.get(key)
 
     def revoke(self, key):
+        if self.tickets.pop(key, None) is None:
+            return
         if key in self.running:
             self.running[key].cancel()
         else:
-            self.queue = deque(pair for pair in self.queue if pair[0]!=key)
+            job = self.queue.pop(key, None)
+            if job and job.timer:
+                job.timer.cancel()
             self.keys.discard(key)
 
     async def close(self) -> None:
         self.closing = True
-        self.queue.clear()
-        for task in self.tasks:
-            task.cancel()
+        for key in tuple(self.keys):
+            self.revoke(key)
         await asyncio.gather(*self.tasks, return_exceptions=True)
         self.keys.clear()
 
@@ -177,6 +218,18 @@ class UserState:
     warnings: dict[str, float] = field(default_factory=dict)
     # Последний экран для нескольких сообщений с меню, включая старые фото.
     screens: OrderedDict = field(default_factory=OrderedDict)
+    repeats: OrderedDict = field(default_factory=OrderedDict)
+    staff_views: OrderedDict = field(default_factory=OrderedDict)
+    service_at: float = 0
+    service_credits: float = 4
+
+
+def remember(items, value):
+    token = token_hex(6)
+    items[token] = value
+    if len(items) > 8:
+        items.popitem(last=False)
+    return token
 
 
 class Protection:
@@ -184,9 +237,14 @@ class Protection:
         self.settings = settings
         self.clock = clock
         self.outgoing = Outgoing(settings, clock, sleep)
-        self.heavy = Jobs(settings.parallel_operations, settings.queue_size)
+        long_parallel = min(settings.data_parallel, max(1, settings.parallel_operations - 1))
+        self.heavy = Jobs(settings.parallel_operations, settings.queue_size, long_parallel)
         self.light = Jobs(8, 0)
         self.edits = Jobs(8, 0)
+        self.priority = Jobs(2, 8)
+        self.control = Jobs(2, 8)
+        self.pools = (self.heavy, self.light, self.edits, self.priority, self.control)
+        self.visitor_writes = deque()
         self.users = OrderedDict()
         self.updates = OrderedDict()
         self.scans: set[int] = set()
@@ -227,13 +285,51 @@ class Protection:
     def revoke(self, uid):
         for task in self.handlers.get(uid, ()):
             task.cancel()
-        for pool in (self.heavy,self.light,self.edits):
+        for pool in self.pools:
             pool.revoke(uid)
         self.users.pop(uid,None)
         self.scans.discard(uid)
 
     def busy(self, uid: int) -> bool:
-        return uid in self.heavy.keys or uid in self.light.keys
+        return any(uid in pool.keys for pool in (self.heavy, self.light, self.priority, self.control))
+
+    def service(self, uid, operation, *, priority=False, control=False, essential=False):
+        state = self.state(uid)
+        if state is None:
+            return False
+        if essential or control:
+            pool = self.control
+            if essential and uid in pool.keys:
+                pool = self.light
+        else:
+            pool = self.priority if priority else self.light
+        if not (essential or control) and (uid in self.light.keys or uid in self.priority.keys):
+            return False
+        now = self.clock()
+        state.service_credits = min(4, state.service_credits + max(0, now - state.service_at))
+        state.service_at = now
+        if state.service_credits < 1 and not essential:
+            return False
+        if pool.submit(uid, operation):
+            if not essential:
+                state.service_credits -= 1
+            return True
+        return False
+
+    def remember_visitor(self, repo, user):
+        now = self.clock()
+        while self.visitor_writes and now - self.visitor_writes[0] >= 60:
+            self.visitor_writes.popleft()
+        if len(self.visitor_writes) < 12 and repo.remember_start(user.id, user.full_name, user.username):
+            self.visitor_writes.append(now)
+
+    async def cancel_operation(self, uid, state):
+        # Отзыв задачи и сброс диалога происходят до подтверждения в Telegram.
+        self.heavy.revoke(uid)
+        self.scans.discard(uid)
+        for pool in (self.light, self.edits, self.priority):
+            pool.revoke(uid)
+        await state.clear()
 
     def remaining(self, state: UserState, kind: str) -> int:
         return max(0, ceil(state.after.get(kind, 0) - self.clock()))
@@ -249,5 +345,5 @@ class Protection:
         state.after[kind] = self.clock() + delay
 
     async def close(self) -> None:
-        for pool in (self.heavy, self.light, self.edits):
+        for pool in self.pools:
             await pool.close()
