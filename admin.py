@@ -303,11 +303,13 @@ async def show_detected(message, state, repo, uid, kind, code):
             await tell(message, f"Формат: {code.format}\nЗначение: {code.value}\nВведи название кнопки.", keys(CANCEL))
             return
 
-    await set_flow(state, Flow.photo, kind, decoded=code)
     buttons = [CANCEL]
     if kind == "scan" and code.addable and repo.is_admin(uid):
+        await set_flow(state, Flow.photo, kind, decoded=code)
         nonce = (await state.get_data())["nonce"]
         buttons.insert(0, ("Добавить в каталог", f"flow:add:{nonce}"))
+    else:
+        await set_flow(state, Flow.photo, kind)
     value = "".join(char if char.isprintable() or char in "\n\t" else f"\\u{ord(char):04x}" for char in code.value)
     text = f"Формат: {code.format}\nЗначение:\n{value}"
     if kind == "add_photo":

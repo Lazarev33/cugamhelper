@@ -1,12 +1,18 @@
+import asyncio
 from base64 import b64decode,b64encode
 from io import BytesIO
 import unittest
+from unittest.mock import patch
 from zipfile import ZipFile, ZIP_DEFLATED
 
+from aiogram.methods import SendDocument
+from aiogram.fsm.storage.base import StorageKey
 from docx import Document
 from openpyxl import Workbook,load_workbook
-from test_bot import TelegramCase
+from test_bot import TelegramCase, dp
+from dialogs import DialogStorage
 from warehouse import blocks,compare,order
+from warehouse_bot import Data
 from warehouse_files import process,inspect_zip
 
 
@@ -50,7 +56,10 @@ class ProcessingTests(unittest.TestCase):
         w=Workbook()
         for row in [["Key","Counted","Bin"],["02","A","X"],["A","02","Y"],["A","Z","Q"]]:
             w.active.append(row)
-        r=process({"mode":"align","limit":50,"items":[item("xlsx",saved(w),a="A",b="B",link="C",header=1)]})
+        source = saved(w)
+        with patch("openpyxl.worksheet._writer.create_temporary_file",
+                   side_effect=AssertionError("XLSX worksheet must not touch disk")):
+            r=process({"mode":"align","limit":50,"items":[item("xlsx",source,a="A",b="B",link="C",header=1)]})
         s=load_workbook(BytesIO(b64decode(r["outputs"][0]["data"]))).active
         self.assertEqual(list(s.values)[1:],[("02","02","Y"),("A","A","X"),("A",None,None),(None,"Z","Q")])
 
@@ -95,6 +104,30 @@ class TelegramProcessing(TelegramCase):
         await self.click(next(b.callback_data for b in buttons if b.callback_data.endswith(":ref")))
         self.assertIn("Эталон получен", self.session.requests[-1].text)
 
+    async def test_file_result_remains_in_chat_and_session_is_cleared(self):
+        book = Workbook()
+        book.active.append(["PALLET-002"])
+        book.active.append(["PALLET-001"])
+        source = saved(book)
+
+        async def download(file_id, destination):
+            destination.write(source)
+
+        await self.click("data:asc")
+        with patch.object(self.bot, "download", side_effect=download):
+            await self.feed(message={"message_id": 6, "date": 1, "chat": {"id": 42, "type": "private"},
+                "from": {"id": 42, "first_name": "A", "is_bot": False},
+                "document": {"file_id": "example", "file_unique_id": "u", "file_name": "stock.xlsx"}})
+        report, result = self.session.requests[-2:]
+        self.assertIn("Сортировка завершена", report.text)
+        self.assertIsInstance(result, SendDocument)
+        actual = load_workbook(BytesIO(result.document.data))
+        self.assertEqual(list(actual.active.values), [("PALLET-001",), ("PALLET-002",)])
+        self.assertFalse(any("deleteMessage" in request.__api_method__ for request in self.session.requests))
+        ctx = dp.fsm.get_context(bot=self.bot, chat_id=42, user_id=42)
+        self.assertIsNone(await ctx.get_state())
+        self.assertEqual(await ctx.get_data(), {})
+
     async def test_quick_three_messages(self):
         await self.click("data:check")
         before=len(self.session.requests)
@@ -124,13 +157,24 @@ class TelegramProcessing(TelegramCase):
         self.assertEqual(self.session.requests[-1].text,"0009")
 
     async def test_expired_dialog(self):
-        from unittest.mock import patch
-        with patch("warehouse_bot.monotonic",return_value=1):
+        with patch("warehouse_bot.monotonic", self.clock), patch.object(dp.storage, "clock", self.clock):
             await self.click("data:ref")
             await self.send("A")
-        with patch("warehouse_bot.monotonic",return_value=1000):
+            self.clock.now += 1000
             await self.send("B")
-        self.assertIn("истёк",self.session.requests[-1].text)
+        self.assertEqual(self.session.requests[-1].text, "Что сделать с текстом?")
+
+    async def test_dialog_expires_with_no_new_updates(self):
+        storage = DialogStorage(ttl=600)
+        storage.data_ttl = 0.01
+        self.addAsyncCleanup(storage.close)
+        key = StorageKey(bot_id=1, chat_id=42, user_id=42)
+        await storage.set_state(key, Data.input)
+        await storage.set_data(key, {"at": storage.clock(), "first": {"text": "PALLET-001"}})
+        self.assertIn(key, storage.storage)
+        await asyncio.sleep(0.05)
+        self.assertNotIn(key, storage.storage)
+        self.assertNotIn(key, storage.timers)
 
 
 class TableTests(unittest.TestCase):

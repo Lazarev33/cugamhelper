@@ -26,6 +26,7 @@ from catalog import Catalog, CatalogError
 from dialogs import DialogStorage
 from branding import BOT_NAME
 from parser import clean_numbers, chunks
+from private_process import disable_core_dumps
 from protection import Protection, UserState
 from settings import load_settings
 
@@ -367,17 +368,20 @@ async def process_numbers(message: Message, text: str, guard: Protection) -> Non
 
 
 @dp.error()
-async def log_handler_error(event: ErrorEvent) -> None:
-    logging.error("Ошибка обработки Telegram-события: %s", type(event.exception).__name__)
+async def handle_update_error(event: ErrorEvent) -> bool:
+    # Ошибка Telegram может содержать исходный запрос с рабочими данными.
+    return True
 
 
 async def main() -> None:
+    disable_core_dumps()
     load_dotenv(Path(__file__).with_name(".env"))
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise SystemExit("Не задан BOT_TOKEN. На VPS используй sudo numberbot token.")
     try:
         settings = load_settings()
+        dp.storage.data_ttl = settings.data_ttl
         location = Path(os.getenv("STATE_DIRECTORY") or Path(__file__).with_name(".state"))
         repo = Catalog(location / "catalog.sqlite3", settings.owner_telegram_id, legacy_ids=settings.allowed_user_ids)
     except (OSError, ValueError) as error:
@@ -390,9 +394,13 @@ async def main() -> None:
             nonlocal notify_address
             try:
                 result = await make_request(client, method)
-            except TelegramNetworkError:
-                # У некоторых сетевых исключений URL запроса содержит токен.
-                raise TelegramNetworkError(method=method, message="Сетевая ошибка Telegram") from None
+            except Exception as error:
+                if isinstance(method, GetUpdates) or isinstance(error, TelegramNetworkError):
+                    # aiogram выводит ошибки опроса целиком, включая тело ответа при сбое декодирования.
+                    raise TelegramNetworkError(
+                        method=method, message=f"Сбой обмена с Telegram ({type(error).__name__})",
+                    ) from None
+                raise
             if notify_address and isinstance(method, GetUpdates):
                 address = notify_address
                 if address.startswith("@"):
@@ -435,7 +443,8 @@ async def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    logging.getLogger("aiogram.event").disabled = True
+    logging.getLogger("protection").disabled = True
     try:
         asyncio.run(main())
     except Exception as error:

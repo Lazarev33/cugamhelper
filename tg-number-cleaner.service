@@ -20,7 +20,11 @@ UMask=0077
 StateDirectory=tg-number-cleaner
 StateDirectoryMode=0700
 NoNewPrivileges=true
-PrivateTmp=true
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777
+TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777
+MemorySwapMax=0
+LimitCORE=0
+CoredumpFilter=0x0
 ProtectSystem=strict
 ProtectHome=true
 ProtectKernelTunables=true

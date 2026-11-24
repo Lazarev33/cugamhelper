@@ -1,6 +1,7 @@
 """Диалоги обработки складских данных."""
 import asyncio
 from base64 import b64encode,b64decode
+from contextlib import suppress
 from io import BytesIO
 import json
 from pathlib import Path
@@ -60,8 +61,9 @@ async def worker(request,timeout):
         return result
     finally:
         if child.returncode is None:
-            child.kill()
-            await child.wait()
+            with suppress(ProcessLookupError):
+                child.kill()
+            await child.communicate()
 
 
 class Buffer(BytesIO):
@@ -76,6 +78,10 @@ class Buffer(BytesIO):
 
 def register(dp, clean):
     active=set()
+
+    async def clear_current(state, nonce):
+        if (await state.get_data()).get("nonce") == nonce:
+            await state.clear()
 
     @dp.callback_query(F.data.startswith("data:"))
     async def select(query,state,guard):
@@ -136,7 +142,11 @@ def register(dp, clean):
             buttons.inline_keyboard = [sum(rows[i:i+2], []) for i in range(0,len(rows),2)]
             await state.set_state(Data.offer)
             await state.set_data({"source":source, "nonce":nonce, "at":monotonic()})
-            await message.answer("Что сделать с файлом?" if doc else "Что сделать с текстом?", reply_markup=buttons)
+            try:
+                await message.answer("Что сделать с файлом?" if doc else "Что сделать с текстом?", reply_markup=buttons)
+            except (Exception, asyncio.CancelledError):
+                await clear_current(state, nonce)
+                raise
         guard.light.submit(uid, offer)
 
     @dp.callback_query(F.data.startswith("offer:"))
@@ -222,7 +232,12 @@ def register(dp, clean):
         opts=source["opts"]
         if mode=="ref" and "first" not in data:
             await state.update_data(first=source,opts={})
-            await message.answer("Эталон получен. Пришли проверяемый список.");return
+            try:
+                await message.answer("Эталон получен. Пришли проверяемый список.")
+            except (Exception, asyncio.CancelledError):
+                await clear_current(state, data["nonce"])
+                raise
+            return
         active.intersection_update(guard.heavy.keys)
         if guard.remaining(user,"data") or len(active)>=cfg.data_parallel:
             if guard.warning(user,"data",cfg.warning_interval):
@@ -230,6 +245,8 @@ def register(dp, clean):
             return
         async def run():
             try:
+                if (await state.get_data()).get("nonce") != data["nonce"]:
+                    return
                 items=[]
                 for item in ([data["first"],source] if "first" in data else [source]):
                     if "id" in item:
@@ -259,7 +276,7 @@ def register(dp, clean):
                     await state.set_data({"mode":mode,"nonce":token_hex(8),"opts":{},"at":monotonic()})
                     await message.answer((str(error) or "Время обработки истекло.")+" Пришли данные заново.",reply_markup=markup(mode))
             finally:
-                if (await state.get_data()).get("nonce")==data["nonce"]:await state.clear()
+                await clear_current(state, data["nonce"])
                 active.discard(uid)
         if guard.heavy.submit(uid,run):
             active.add(uid)

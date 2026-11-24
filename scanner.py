@@ -1,6 +1,7 @@
 """Локальное декодирование изображений в ограниченном дочернем процессе."""
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, asdict
 from io import BytesIO
 import json
@@ -11,6 +12,8 @@ import sys
 
 from PIL import Image, ImageOps
 import zxingcpp
+
+from private_process import disable_core_dumps
 
 MAX_BYTES = 5 * 1024 * 1024
 MAX_PIXELS = 8_000_000
@@ -97,8 +100,9 @@ async def scan_local(data: bytes) -> list[Decoded]:
         output, _ = await asyncio.wait_for(worker.communicate(data), SCAN_SECONDS)
     except (asyncio.TimeoutError, asyncio.CancelledError) as error:
         if worker.returncode is None:
-            worker.kill()
-        await worker.wait()
+            with suppress(ProcessLookupError):
+                worker.kill()
+            await worker.communicate()
         if isinstance(error, asyncio.CancelledError):
             raise
         raise ScanError("Сканирование заняло слишком много времени. Приблизь код и повтори.") from None
@@ -128,6 +132,7 @@ async def scan_telegram(bot, file_id: str, size: int | None) -> list[Decoded]:
 
 
 if __name__ == "__main__":
+    disable_core_dumps()
     resource.setrlimit(resource.RLIMIT_AS, (384 * 1024**2, 384 * 1024**2))
     resource.setrlimit(resource.RLIMIT_CPU, (4, 5))
     try:

@@ -4,12 +4,28 @@ from base64 import b64decode, b64encode
 from copy import copy, deepcopy
 from io import BytesIO
 import re
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 from lxml import etree
 from openpyxl import load_workbook
+from openpyxl.drawing.spreadsheet_drawing import SpreadsheetDrawing
 from openpyxl.utils import column_index_from_string
+from openpyxl.worksheet._writer import WorksheetWriter
+from openpyxl.writer.excel import ExcelWriter
 from docx import Document
 from warehouse import alignment, blocks, compare, order
+
+
+class MemoryExcelWriter(ExcelWriter):
+    def write_worksheet(self, worksheet):
+        # Штатный ExcelWriter пишет XML листа через NamedTemporaryFile.
+        worksheet._drawing = SpreadsheetDrawing()
+        worksheet._drawing.charts = worksheet._charts
+        worksheet._drawing.images = worksheet._images
+        with self._archive.open(worksheet.path[1:], "w") as sheet_xml:
+            writer = WorksheetWriter(worksheet, out=sheet_xml)
+            writer.write()
+        worksheet._rels = writer._rels
+        self.manifest.append(worksheet)
 
 
 def inspect_zip(raw):
@@ -159,7 +175,11 @@ class Source:
                             node=row[c]._tc;node.getparent().replace(node,deepcopy(saved[moves[i],c]))
                         else: row[c].text=""
         stream=BytesIO()
-        self.book.save(stream)
+        if self.kind == "xlsx":
+            with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
+                MemoryExcelWriter(self.book, archive).write_data()
+        else:
+            self.book.save(stream)
         if self.table:
             if self.kind=="xlsx":
                 reopened=load_workbook(BytesIO(stream.getvalue()))[self.sheet.title]

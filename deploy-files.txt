@@ -4,6 +4,7 @@ barcodes.py
 admin.py
 catalog.py
 dialogs.py
+private_process.py
 scanner.py
 bot.py
 branding.py

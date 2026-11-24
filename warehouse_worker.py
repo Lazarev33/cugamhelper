@@ -3,7 +3,10 @@ import json
 import resource
 import sys
 
+from private_process import disable_core_dumps
+
 if __name__=="__main__":
+    disable_core_dumps()
     resource.setrlimit(resource.RLIMIT_AS,(512*1024**2,512*1024**2))
     from warehouse_files import process
     try:

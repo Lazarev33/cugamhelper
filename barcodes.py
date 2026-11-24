@@ -1,7 +1,6 @@
 """Загрузка каталога и подготовка PNG Code 128 для Telegram."""
 
 from io import BytesIO
-from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -21,7 +20,6 @@ def validate_value(value: str) -> str:
     return value
 
 
-@lru_cache(maxsize=64)
 def render_png(value: str) -> bytes:
     validate_value(value)
     image = BytesIO()
