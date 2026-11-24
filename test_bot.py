@@ -182,6 +182,23 @@ class BotTests(TelegramCase):
             await self.click(key)
             self.assertIsInstance(self.session.requests[-1], EditMessageText)
 
+    async def test_return_from_data_processing_on_same_message(self):
+        ctx = dp.fsm.get_context(bot=self.bot, chat_id=42, user_id=42)
+        await self.click("menu:main")
+        for mode in ("data:home", "data:asc"):
+            await self.click("data:home")
+            if mode != "data:home":
+                await self.click(mode)
+            section = self.session.requests[-1]
+            button = next(b for row in section.reply_markup.inline_keyboard for b in row
+                          if b.text == "Главное меню")
+            await self.click(button.callback_data, text=section.text)
+            main = self.session.requests[-1]
+            self.assertIsInstance(main, EditMessageText)
+            self.assertIn("Помощник 2 смены", main.text)
+            self.assertIsNone(await ctx.get_state())
+            self.assertEqual(await ctx.get_data(), {})
+
     async def test_role_menu_and_catalog_pages(self):
         for uid, admin in [(43, False), (42, True), (44, True)]:
             if uid == 44:

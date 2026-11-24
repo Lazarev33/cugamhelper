@@ -85,6 +85,9 @@ def register(dp, clean):
         uid=query.from_user.id
         if guard.busy(uid):return
         async def screen():
+            runtime = guard.state(uid)
+            if runtime is not None:
+                runtime.screens.pop(query.message.message_id, None)
             await state.clear()
             if mode not in {"home","help"}:
                 await state.set_state(Data.input)
