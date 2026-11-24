@@ -136,6 +136,7 @@ def fetch_source(work: Path, revision: str) -> Path:
 
 
 def stage_release(source: Path, candidate: Path, revision: str | None) -> None:
+    print("Подготовка файлов релиза.")
     files = (source / "deploy-files.txt").read_text(encoding="utf-8").splitlines()
     if not REQUIRED_FILES.issubset(files):
         raise DeploymentError("В манифесте отсутствуют обязательные файлы установки.")
@@ -149,8 +150,10 @@ def stage_release(source: Path, candidate: Path, revision: str | None) -> None:
         (candidate / "REVISION").write_text(revision + "\n", encoding="ascii")
     checked([sys.executable, "-m", "venv", candidate / ".venv"], timeout=180)
     python = candidate / ".venv/bin/python"
+    print("Установка зависимостей.")
     checked([python, "-m", "pip", "--isolated", "install", "--disable-pip-version-check",
              "-r", candidate / "requirements.txt"], timeout=600)
+    print("Запуск тестов релиза.")
     checked([python, "-m", "unittest", "discover", "-s", candidate, "-p", "test_*.py", "-q"])
     candidate.chmod(0o755)
 
@@ -262,24 +265,28 @@ def deploy(source: Path, revision: str | None, *, start_service: bool, install=F
     candidate = Path(tempfile.mkdtemp(prefix="release-", dir=RELEASES))
     try:
         stage_release(source, candidate, revision)
+        print("Переключение релиза и проверка службы.")
         activate(candidate, start_service=start_service, install=install)
     finally:
         if APP_DIR.resolve() != candidate:
             shutil.rmtree(candidate, ignore_errors=True)
 
 
-def update(*, configured) -> None:
+def update(*, configured, expected=None) -> None:
     with maintenance_lock():
         print(f"Установлено: {release_label(APP_DIR)}")
         revision = remote_revision()
+        if expected is not None and revision != expected:
+            raise DeploymentError("Ревизия изменилась после подтверждения. Проверь обновление ещё раз.")
         if revision == revision_at(APP_DIR):
             print("Установлена актуальная ревизия. Служба продолжает работать в прежнем режиме.")
             return
         print(f"Доступна ревизия main: {revision[:12]}")
-        if input("Установить обновление? [д/Н]: ").strip().lower() not in {"д", "да", "y", "yes"}:
+        if expected is None and input("Установить обновление? [д/Н]: ").strip().lower() not in {"д", "да", "y", "yes"}:
             print("Отменено.")
             return
         with tempfile.TemporaryDirectory(prefix="numberbot-") as temp:
+            print("Получение исходников по HTTPS.")
             source = fetch_source(Path(temp), revision)
             start_service = configured()
             deploy(source, revision, start_service=start_service)

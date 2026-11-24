@@ -32,3 +32,7 @@ test_warehouse.py
 employees.py
 test_access.py
 test_stability.py
+features.py
+tui.py
+test_features.py
+test_tui.py

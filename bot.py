@@ -21,7 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
 from warehouse_bot import register as register_data
-from admin import number, register as register_workflows, send_png, keys
+from admin import number, register as register_workflows, send_png, keys, open_scan
 from catalog import Catalog, CatalogError
 from dialogs import DialogStorage
 from branding import BOT_NAME
@@ -29,39 +29,59 @@ from parser import clean_numbers, chunks
 from private_process import disable_core_dumps
 from protection import Protection, UserState
 from settings import load_settings
+from features import DEFAULT_FEATURES, FeatureStore
 
 
 dp = Dispatcher(storage=DialogStorage())
-MAIN_TEXT = f"Я — {BOT_NAME}. Выбери действие."
+MAIN_TEXT = f"{BOT_NAME}\nВыбери рабочий инструмент."
 CLEAN_TEXT = (
-    "Отправь список в этом чате, по одной строке на номер. Пример:\n\n"
-    "26008178-03.11.2026\n"
-    "26008179-03.11.2026\n\n"
-    "Сначала придёт отчёт, затем — номера для копирования. "
-    "Уже очищенные номера тоже принимаются."
+    "Очистка номеров\nОтправь номера по одному в строке. Можно добавить дату, например 26008178-03.11.2026. "
+    "Отчёт и готовый список придут отдельно."
 )
-HELP_TEXT = (
-    "ШК — выбери складской код и открой изображение для сканирования.\n"
-    "Очистка номеров — отправь список номеров с датами или без дат. "
-    "Исправь указанные строки, если бот сообщит об ошибках.\n\n"
-    "/scan — прочитать штрихкод с фото. /cancel — отменить текущий диалог.\n"
-    "/menu — главное меню."
-)
+UNAVAILABLE = "Инструмент отключён на сервере. Открой /menu."
 
 
-def menu_keys(admin=False) -> InlineKeyboardBuilder:
+def help_text(features):
+    lines = ["Помощь"]
+    if features.enabled("barcode_catalog"):
+        lines.append("ШК · каталог и выдача складских кодов.")
+    if features.enabled("barcode_scan"):
+        lines.append("ШК · отправь фото для распознавания. Прямая команда /scan.")
+    if features.permits("clean"):
+        lines.append("Очистка номеров · отправь список с датами или без дат.")
+    if features.data:
+        lines.append("Обработка данных · выбери операцию в меню или пришли входные данные в личный чат.")
+    if not (features.barcodes or features.permits("clean") or features.data):
+        lines.append("Рабочие инструменты сейчас выключены. По вопросам доступа обращайся к администратору.")
+    lines.append("/menu — главное меню · /cancel — отменить текущую операцию.")
+    return "\n\n".join(lines)
+
+
+def menu_keys(admin=False, features=DEFAULT_FEATURES) -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text="ШК", callback_data="menu:barcodes")
-    keyboard.button(text="Сканировать ШК", callback_data="scan:start")
-    keyboard.button(text="Обработка данных", callback_data="data:home")
+    if features.barcodes:
+        keyboard.button(text="ШК", callback_data="menu:shk")
+    if features.permits("clean"):
+        keyboard.button(text="Очистка номеров", callback_data="menu:clean")
+    if features.data:
+        keyboard.button(text="Обработка данных", callback_data="data:home")
     if admin:
         keyboard.button(text="Админ-панель", callback_data="ad:home")
     keyboard.button(text="Помощь", callback_data="menu:help")
-    keyboard.adjust(2, 1)
+    keyboard.adjust(1)
     return keyboard
 
 
-def section_keys(repo: Catalog | None = None, page: int = 0) -> InlineKeyboardBuilder:
+def shk_keys() -> InlineKeyboardBuilder:
+    keyboard = InlineKeyboardBuilder()
+    keyboard.button(text="Каталог ШК", callback_data="menu:barcodes")
+    keyboard.button(text="Сканировать ШК", callback_data="scan:start")
+    keyboard.button(text="Главное меню", callback_data="menu:main")
+    keyboard.adjust(1)
+    return keyboard
+
+
+def section_keys(repo: Catalog | None = None, page: int = 0, *, features=DEFAULT_FEATURES) -> InlineKeyboardBuilder:
     keyboard = InlineKeyboardBuilder()
     if repo is not None:
         records, more = repo.page(page, active=True)
@@ -87,6 +107,8 @@ def section_keys(repo: Catalog | None = None, page: int = 0) -> InlineKeyboardBu
             arrows.append(InlineKeyboardButton(text="Далее ›", callback_data=f"catalog:{page+1}"))
         if arrows:
             keyboard.row(*arrows)
+    if repo is not None and features.enabled("barcode_scan"):
+        keyboard.row(InlineKeyboardButton(text="Назад", callback_data="menu:shk"))
     keyboard.row(InlineKeyboardButton(text="Главное меню", callback_data="menu:main"))
     return keyboard
 
@@ -109,6 +131,19 @@ async def restrict_updates(handler, event: Update, data: dict):
         return
     if guard.duplicate(event.update_id):
         return
+    guard.sync_features(dp.storage)
+    if query:
+        name = query.data or ""
+        policy = guard.features
+        if (name.startswith(("barcode:", "code:", "catalog:")) or name == "menu:barcodes") and not policy.enabled("barcode_catalog"):
+            await query.answer(UNAVAILABLE)
+            return
+        if name == "menu:clean" and not policy.permits("clean"):
+            await query.answer(UNAVAILABLE)
+            return
+        if name == "menu:shk" and not policy.barcodes:
+            await query.answer(UNAVAILABLE)
+            return
     task = asyncio.current_task()
     handlers = guard.handlers.setdefault(user.id, set())
     handlers.add(task)
@@ -147,12 +182,12 @@ async def start(message: Message, guard: Protection, state: FSMContext, repo: Ca
     if ticket := guard.heavy.ticket(uid):
         show_operation_menu(message, guard, uid, ticket)
         return
-    queue_menu(message, guard, MAIN_TEXT, menu_keys(repo.is_admin(uid)), dialog=state, priority=repo.is_admin(uid))
+    queue_menu(message, guard, MAIN_TEXT, menu_keys(repo.is_admin(uid), guard.features), dialog=state, priority=repo.is_admin(uid))
 
 
 @dp.message(Command("help"))
 async def help_command(message: Message, guard: Protection, state: FSMContext) -> None:
-    queue_menu(message, guard, HELP_TEXT, section_keys(), dialog=state)
+    queue_menu(message, guard, help_text(guard.features), section_keys(), dialog=state)
 
 
 def show_operation_menu(message, guard, uid, ticket):
@@ -179,12 +214,12 @@ async def operation_navigation(query: CallbackQuery, guard: Protection, state: F
     await guard.cancel_operation(uid, state)
     await query.answer("Операция отменена.")
     if isinstance(query.message, Message):
-        guard.service(uid, lambda: query.message.answer(MAIN_TEXT, reply_markup=menu_keys(repo.is_admin(uid)).as_markup()),
+        guard.service(uid, lambda: query.message.answer(MAIN_TEXT, reply_markup=menu_keys(repo.is_admin(uid), guard.features).as_markup()),
                       priority=True, essential=True)
 
 
 @dp.callback_query(F.data.in_({
-    "menu:barcodes", "menu:clean", "menu:help", "menu:main", "menu:back",
+    "menu:shk", "menu:barcodes", "menu:clean", "menu:help", "menu:main", "menu:back",
 }) | F.data.startswith("catalog:"))
 async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state: FSMContext) -> None:
     message = query.message
@@ -207,20 +242,30 @@ async def navigate(query: CallbackQuery, repo: Catalog, guard: Protection, state
     await state.clear()
     screen = "menu:main" if query.data == "menu:back" else query.data
 
-    if screen == "menu:barcodes" or screen.startswith("catalog:"):
+    policy = guard.features
+    if screen == "menu:shk" and policy.enabled("barcode_catalog") and policy.enabled("barcode_scan"):
+        title, keyboard = "ШК\nВыбери действие.", shk_keys()
+    elif screen == "menu:shk" and policy.enabled("barcode_scan"):
+        guard.service(uid, lambda: open_scan(message, state, keyboard_parent="menu:main", edit=True, guard=guard))
+        return
+    elif screen in {"menu:shk", "menu:barcodes"} or screen.startswith("catalog:"):
+        if not policy.enabled("barcode_catalog"):
+            return
         try:
             page = number(screen.partition(":")[2], 1_000_000) if screen.startswith("catalog:") else 0
         except CatalogError:
             return
-        title = f"Выбери штрихкод · страница {page+1}"
-        keyboard = section_keys(repo, page)
+        title = f"Каталог ШК · страница {page+1}"
+        keyboard = section_keys(repo, page, features=policy)
     elif screen == "menu:clean":
+        if not policy.permits("clean"):
+            return
         await state.set_state("clean")
         title, keyboard = CLEAN_TEXT, section_keys()
     elif screen == "menu:help":
-        title, keyboard = HELP_TEXT, section_keys()
+        title, keyboard = help_text(policy), section_keys()
     else:
-        title, keyboard = MAIN_TEXT, menu_keys(repo.is_admin(uid))
+        title, keyboard = MAIN_TEXT, menu_keys(repo.is_admin(uid), guard.features)
     markup = keyboard.as_markup()
     screen_key = (title, markup.model_dump_json())
     if runtime.screens.get(message.message_id) == screen_key:
@@ -309,7 +354,7 @@ async def send_barcode(query: CallbackQuery, repo: Catalog, guard: Protection) -
         else:
             await message.answer("ШК больше недоступен. Открой каталог заново.")
 
-    if not guard.heavy.submit(uid, deliver):
+    if not guard.submit_feature(uid, deliver, lambda f: f.enabled("barcode_catalog")):
         guard.note("очередь тяжёлых операций заполнена")
         text = "Бот занят. Попробуй чуть позже." if guard.warning(state, "busy", 2) else None
         await query.answer(text, show_alert=False)
@@ -336,12 +381,15 @@ async def send_plain(message: Message, text: str) -> Message:
     return await message.answer(text, parse_mode=None)
 
 
-@dp.message(F.text)
+@dp.message(F.text & ~F.text.startswith("/"))
 async def handle_text(message: Message, guard: Protection) -> None:
     await clean_input(message, guard, message.from_user.id, message.text)
 
 
 async def clean_input(message, guard, uid, text):
+    if not guard.features.permits("clean", "text"):
+        guard.service(uid, lambda: send_plain(message, UNAVAILABLE))
+        return
     state = guard.state(uid)
     if state is None:
         return
@@ -354,7 +402,7 @@ async def clean_input(message, guard, uid, text):
         if guard.warning(state, "clean", guard.settings.warning_interval):
             guard.service(uid, lambda: send_plain(message, f"Слишком частые запросы. Подожди {remaining} сек."))
         return
-    if guard.heavy.submit(uid, lambda: process_numbers(message, text, guard)):
+    if guard.submit_feature(uid, lambda: process_numbers(message, text, guard), lambda f: f.permits("clean", "text")):
         guard.limit(state, "heavy", guard.settings.clean_cooldown)
     else:
         guard.note("очередь тяжёлых операций заполнена")
@@ -465,21 +513,29 @@ async def main() -> None:
                 BotCommand(command="start", description="Запустить бота"),
                 BotCommand(command="menu", description="Главное меню"),
                 BotCommand(command="help", description="Помощь"),
-                BotCommand(command="scan", description="Сканировать штрихкод"),
+                BotCommand(command="cancel", description="Отменить действие"),
             ], request_timeout=5)
         except TelegramAPIError as error:
             logging.warning("Не удалось задать команды бота: %s", type(error).__name__)
-        guard = Protection(settings)
+        guard = Protection(settings, feature_store=FeatureStore())
         guard.outgoing.allowed = repo.allowed
         if repo.owner is None:
             logging.warning("Доступ закрыт. Назначь владельца через sudo numberbot owner.")
         bot.session.middleware.register(guard.outgoing)
+        async def watch_features():
+            while True:
+                await asyncio.sleep(1)
+                guard.sync_features(dp.storage)
+
+        watcher = asyncio.create_task(watch_features())
         try:
             await dp.start_polling(
                 bot, repo=repo, guard=guard, close_bot_session=False,
                 tasks_concurrency_limit=32, allowed_updates=["message", "callback_query"],
             )
         finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
             await guard.close()
             repo.close()
 

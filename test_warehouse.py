@@ -85,7 +85,7 @@ class TelegramProcessing(TelegramCase):
     async def test_direct_text_offer_and_stale_button(self):
         await self.send("B\nA\n\nA\nB")
         prompt = self.session.requests[-1]
-        button = prompt.reply_markup.inline_keyboard[0][0]
+        button = next(b for row in prompt.reply_markup.inline_keyboard for b in row if b.text == "Сверить два списка")
         await self.click(button.callback_data)
         report, first, second = self.session.requests[-3:]
         self.assertIn("Сошлось: 2/2", report.text)

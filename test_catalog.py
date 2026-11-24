@@ -187,7 +187,7 @@ class AdminTests(TelegramCase):
 
     async def test_manual_confirm_then_staff_catalog_updates(self):
         await self.send("/admin")
-        self.assertIn("Каталог ШК", self.buttons())
+        self.assertIn("Управление каталогом", self.buttons())
         await self.manual("Зона приёмки №1", "000Az")
         self.assertIsInstance(self.session.requests[-1], SendPhoto)
         self.assertIsNone(self.repo.by_value("000Az"))

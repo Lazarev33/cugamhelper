@@ -41,7 +41,7 @@ async def screen(message, state, guard, repo, uid, action, args):
         count=repo.db.execute("SELECT count(*) FROM trusted_users WHERE active=1").fetchone()[0]
         await tell(message,f"Доверенные пользователи\nРежим доступа: закрытый\nДопущено сотрудников: {count}",keys(
             ("Список сотрудников","ad:stafflist:0"),("Добавить сотрудника","ad:staffadd"),
-            ("Нажимали /start","ad:staffstarts:0"), ("Найти сотрудника","ad:staffsearch"),("Назад","ad:home")))
+            ("Нажимали /start","ad:staffstarts:0"), ("Найти сотрудника","ad:staffsearch"),("Назад","ad:access")))
     elif action=="staffstarts":
         page=number(args[0],100000)
         rows=repo.visitors(uid,page)

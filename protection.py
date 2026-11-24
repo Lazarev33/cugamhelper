@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.methods import AnswerCallbackQuery, EditMessageCaption, EditMessageText, SendDocument, SendMessage, SendPhoto
 
 from settings import Settings
+from features import DEFAULT_FEATURES
 
 LOG = logging.getLogger(__name__)
 CHAT_REQUESTS = (SendMessage, SendPhoto, SendDocument, EditMessageText, EditMessageCaption)
@@ -233,9 +234,12 @@ def remember(items, value):
 
 
 class Protection:
-    def __init__(self, settings: Settings, clock=monotonic, sleep=asyncio.sleep):
+    def __init__(self, settings: Settings, clock=monotonic, sleep=asyncio.sleep, *, feature_store=None):
         self.settings = settings
         self.clock = clock
+        self.feature_store = feature_store
+        self.feature_snapshot = self.features
+        self.feature_jobs = {}
         self.outgoing = Outgoing(settings, clock, sleep)
         long_parallel = min(settings.data_parallel, max(1, settings.parallel_operations - 1))
         self.heavy = Jobs(settings.parallel_operations, settings.queue_size, long_parallel)
@@ -250,6 +254,42 @@ class Protection:
         self.scans: set[int] = set()
         self.handlers = {}
         self.log_after = {}
+
+    @property
+    def features(self):
+        return self.feature_store.current() if self.feature_store else DEFAULT_FEATURES
+
+    def submit_feature(self, uid, operation, permits, *, on_disabled=None, **kwargs):
+        if not permits(self.features):
+            return False
+
+        async def gated():
+            try:
+                if permits(self.features):
+                    await operation()
+                elif on_disabled:
+                    await on_disabled()
+            finally:
+                self.feature_jobs.pop(uid, None)
+
+        if not self.heavy.submit(uid, gated, **kwargs):
+            return False
+        self.feature_jobs[uid] = self.heavy.ticket(uid), permits
+        return True
+
+    def sync_features(self, storage):
+        snapshot = self.features
+        changed = snapshot != self.feature_snapshot
+        self.feature_snapshot = snapshot
+        for uid, (ticket, permits) in tuple(self.feature_jobs.items()):
+            if self.heavy.ticket(uid) != ticket or (changed and uid in self.heavy.queue and not permits(snapshot)):
+                if self.heavy.ticket(uid) == ticket:
+                    self.heavy.revoke(uid)
+                self.feature_jobs.pop(uid, None)
+        if changed:
+            for key, record in tuple(storage.storage.items()):
+                if key.user_id not in self.heavy.running and not snapshot.allows_dialog(record.state, record.data):
+                    storage.remove(key)
 
     def note(self, reason: str) -> None:
         now = self.clock()
@@ -287,6 +327,7 @@ class Protection:
             task.cancel()
         for pool in self.pools:
             pool.revoke(uid)
+        self.feature_jobs.pop(uid, None)
         self.users.pop(uid,None)
         self.scans.discard(uid)
 
@@ -326,6 +367,7 @@ class Protection:
     async def cancel_operation(self, uid, state):
         # Отзыв задачи и сброс диалога происходят до подтверждения в Telegram.
         self.heavy.revoke(uid)
+        self.feature_jobs.pop(uid, None)
         self.scans.discard(uid)
         for pool in (self.light, self.edits, self.priority):
             pool.revoke(uid)

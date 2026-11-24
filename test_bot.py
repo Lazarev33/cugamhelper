@@ -170,12 +170,12 @@ class BotTests(TelegramCase):
             request = self.session.requests[-1]
             self.assertIn("Помощник 2 смены", request.text)
             self.assertEqual([button.text for row in request.reply_markup.inline_keyboard for button in row],
-                             ["ШК", "Сканировать ШК", "Обработка данных", "Админ-панель", "Помощь"])
+                             ["ШК", "Очистка номеров", "Обработка данных", "Админ-панель", "Помощь"])
             self.clock.now += 1.1
         await self.click("menu:barcodes")
         menu = self.session.requests[-1]
         keyboard = [button for row in menu.reply_markup.inline_keyboard for button in row]
-        self.assertEqual([button.text for button in keyboard], [*self.catalog, "Главное меню"])
+        self.assertEqual([button.text for button in keyboard], [*self.catalog, "Назад", "Главное меню"])
         await self.click("menu:barcodes")
         self.assertIsInstance(self.session.requests[-1], AnswerCallbackQuery)
         for key in ("menu:back", "menu:clean", "menu:help", "menu:main"):
@@ -205,7 +205,7 @@ class BotTests(TelegramCase):
                 self.repo.set_admin(42, 44, True)
             await self.send("/menu", uid=uid)
             rows = self.session.requests[-1].reply_markup.inline_keyboard
-            self.assertEqual([b.text for b in rows[0]], ["ШК", "Сканировать ШК"])
+            self.assertEqual([b.text for b in rows[0]], ["ШК"])
             self.assertEqual(any(b.text == "Админ-панель" for row in rows for b in row), admin)
         self.repo.save(42, "Длинное название зоны приёмки", "EXTRA")
         await self.click("catalog:1")

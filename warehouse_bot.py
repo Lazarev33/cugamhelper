@@ -19,6 +19,7 @@ from aiogram.exceptions import ClientDecodeError, TelegramAPIError, TelegramBadR
 from admin import keys
 from parser import chunks
 from protection import remember
+from features import DATA_ACTIONS, DEFAULT_FEATURES, FORMATS, MODES
 
 
 DATA_DEADLINE = 45
@@ -29,32 +30,56 @@ class Data(StatesGroup):
     offer=State()
 
 
-MENU={
-    "home":[("Сортировка","asc"),("Сверка данных","check"),("Поиск дубликатов","dups"),("Очистка номеров","menu:clean"),("Помощь","help")],
-    "check":[("Сверка пар","pairs"),("Сверка с эталоном","ref"),("Сверка таблиц","align")],
-    "asc":[("По убыванию","desc")], "desc":[("По возрастанию","asc")],
-    "dups":[("Удалить дубликаты","unique")]}
-TITLE={"home":"Обработка данных","check":"Сверка данных. Можно сразу прислать два блока через пустую строку.",
-       "asc":"Сортировка по возрастанию.","desc":"Сортировка по убыванию.",
-       "quick":"Отправь два списка через пустую строку.","ref":"Сначала пришли эталон, затем второй список.",
-       "pairs":"Пришли перемешанные пары. Можно сначала указать «ожидаю 50».",
-       "align":"Пришли таблицу. По умолчанию сверяются A и B, с первой строки.",
-       "dups":"Найду и сгруппирую повторения.","unique":"Удаление повторов выбрано. Пришли список.",
-       "help":"Поддерживаются сообщение, TXT, XLSX и DOCX. Настройки перед файлом отдельным сообщением: «лист 2», «столбцы A B C,D» (ключ, проверяемый, связанные), «заголовок 1», «область 2-15» для абзацев Word. /cancel — отмена."}
+DISABLED = "Операция или формат отключены. Открой /menu."
+TITLE = {
+    "home": "Обработка данных\nВыбери операцию.",
+    "check": "Сверка данных\nОтправь два списка через пустую строку.",
+    "quick": "Сверка данных\nОтправь два списка через пустую строку.",
+    "asc": "Сортировка по возрастанию.", "desc": "Сортировка по убыванию.",
+    "ref": "Сверка с эталоном\nСначала пришли эталон, затем второй список.",
+    "pairs": "Сверка пар\nПришли перемешанные пары. Можно сначала указать «ожидаю 50».",
+    "align": "Сверка таблиц\nПришли таблицу. По умолчанию сверяются A и B, с первой строки.",
+    "dups": "Поиск дубликатов\nПришли список для группировки повторений.",
+    "unique": "Удаление дубликатов\nПришли список. Повторяющиеся записи будут удалены из результата.",
+    "help": "Помощь по обработке данных",
+}
 
 
-def markup(mode, nonce=None):
-    parent="check" if mode in {"quick","ref","pairs","align"} else "home"
-    options=list(MENU.get(mode,[]))
-    if mode!="home": options.append(("Назад",parent))
+def data_title(mode, policy):
+    if mode != "help":
+        return TITLE[mode]
+    labels = {"text": "сообщения", "txt": "TXT", "xlsx": "XLSX", "docx": "DOCX"}
+    supported = ", ".join(labels[kind] for kind in labels if policy.input_enabled(kind))
+    parts = [TITLE["help"], f"Доступные форматы: {supported}."]
+    if policy.input_enabled("xlsx") or policy.input_enabled("docx"):
+        parts.append("Параметры перед файлом: «лист 2», «столбцы A B C,D», «заголовок 1».")
+    if policy.input_enabled("docx"):
+        parts.append("Для абзацев Word можно указать «область 2-15».")
+    parts.append("/cancel — отменить операцию.")
+    return "\n".join(parts)
+
+
+def available(mode, policy, *kinds):
+    return policy.permits(mode, *kinds) if mode in MODES else mode in {"home", "help"} and policy.data
+
+
+def markup(mode, nonce=None, policy=DEFAULT_FEATURES):
+    options = []
+    if mode == "home":
+        options.extend((label, f"data:{action}") for action, label, _ in DATA_ACTIONS
+                       if policy.permits(action) and (action != "unique" or not policy.permits("dups")))
+        if policy.data:
+            options.append(("Помощь по обработке", "data:help"))
+    elif mode in {"asc", "desc"}:
+        options.append(("По убыванию", "data:desc") if mode == "asc" else ("По возрастанию", "data:asc"))
+    elif mode == "dups" and policy.permits("unique"):
+        options.append(("Удалить дубликаты", "data:unique"))
     if nonce:
         options.append(("Отмена", f"flow:cancel:{nonce}"))
-    options.append(("Главное меню","menu:main"))
-    keyboard=keys(*[(label,action if ":" in action else "data:"+action) for label,action in options])
-    rows=keyboard.inline_keyboard
-    if mode in {"home","check"}:
-        rows[:2]=[rows[0]+rows[1]]
-    return keyboard
+    if mode != "home" and policy.data:
+        options.append(("Назад", "data:home"))
+    options.append(("Главное меню", "menu:main"))
+    return keys(*options)
 
 
 async def worker(request,timeout):
@@ -162,26 +187,29 @@ def register(dp, clean):
             if parameters is None:
                 await query.answer("Повтор устарел. Выбери операцию заново.")
                 return
-            mode, opts, next_opts = parameters
+            mode, opts, next_opts, kinds = parameters
             screen_mode = mode
         else:
-            screen_mode, opts, next_opts = selection, {}, {}
+            screen_mode, opts, next_opts, kinds = selection, {}, {}, ()
             mode = "quick" if screen_mode == "check" else screen_mode
-        if screen_mode not in TITLE:
-            await query.answer("Действие недоступно.")
+        if not available(screen_mode, guard.features, *kinds):
+            await query.answer(DISABLED)
             return
 
         async def screen():
+            policy = guard.features
+            if not available(screen_mode, policy, *kinds):
+                return
             runtime = guard.state(uid)
             if runtime is not None:
                 runtime.screens.pop(query.message.message_id, None)
             await state.clear()
             if screen_mode in {"home", "help"}:
-                keyboard = markup(screen_mode)
+                keyboard = markup(screen_mode, policy=policy)
             else:
                 data = await set_mode(state, mode, opts, next_opts)
-                keyboard = markup(screen_mode, data["nonce"])
-            await edit_screen(query.message, TITLE[screen_mode], keyboard)
+                keyboard = markup(screen_mode, data["nonce"], policy)
+            await edit_screen(query.message, data_title(screen_mode, policy), keyboard)
 
         offered = guard.service(uid, screen)
         await query.answer(None if offered else "Подожди немного и повтори.")
@@ -195,8 +223,8 @@ def register(dp, clean):
         kind = Path(doc.file_name or "").suffix.lower()[1:] if doc else "text"
 
         async def offer():
-            if kind not in {"xlsx", "docx", "txt", "text"}:
-                await message.answer("Для обработки пришли XLSX, DOCX или TXT.")
+            if kind not in FORMATS:
+                await message.answer("Для обработки подходят XLSX, DOCX и TXT, если их разрешил администратор.")
                 return
             if doc and (doc.file_size or 0) > guard.settings.data_mib * 1024**2:
                 await message.answer("Файл превышает лимит размера.")
@@ -204,20 +232,19 @@ def register(dp, clean):
             if not doc and len(message.text) > guard.settings.max_input_chars:
                 await message.answer("Раздели текст на несколько сообщений.")
                 return
+            policy = guard.features
+            actions = policy.offers(kind)
+            if not actions:
+                if await state.get_state() == Data.offer.state:
+                    await state.clear()
+                await message.answer(DISABLED)
+                return
             source = {"kind": kind, "opts": {}}
             if doc:
                 source["id"] = doc.file_id
             else:
                 source["text"] = message.text
             nonce = token_hex(6)
-            actions = [("Сортировать", "asc"), ("Найти дубликаты", "dups"),
-                       ("Проверить пары", "pairs"), ("Использовать как эталон", "ref")]
-            if kind in {"xlsx", "docx"}:
-                actions.insert(0, ("Сопоставить столбцы", "align"))
-            if kind != "xlsx":
-                actions.insert(0, ("Сверить два списка", "quick"))
-            if kind == "text":
-                actions.append(("Очистить номера", "clean"))
             actions.append(("Отмена", "cancel"))
             buttons = keys(*[(label, f"offer:{nonce}:{mode}") for label, mode in actions])
             rows = buttons.inline_keyboard
@@ -242,10 +269,9 @@ def register(dp, clean):
             return
         mode = fields[2]
         source = pending["source"]
-        if mode not in {"asc", "dups", "pairs", "ref", "align", "quick", "clean", "cancel"} or (
-            mode == "clean" and source["kind"] != "text"
-        ):
-            await query.answer("Действие недоступно.")
+        if mode != "cancel" and (mode not in {"asc", "dups", "unique", "pairs", "ref", "align", "quick", "clean"}
+                                 or not guard.features.permits(mode, source["kind"])):
+            await query.answer(DISABLED)
             return
         if not isinstance(query.message, Message) or (mode != "cancel" and guard.busy(uid)):
             await query.answer("Подожди немного.")
@@ -257,7 +283,7 @@ def register(dp, clean):
         message = query.message
         if mode == "cancel":
             await guard.cancel_operation(uid, state)
-            guard.service(uid, lambda: edit_screen(message, "Действие отменено.", markup("home")),
+            guard.service(uid, lambda: edit_screen(message, "Действие отменено.", markup("home", policy=guard.features)),
                           priority=True, essential=True)
         elif mode == "clean":
             await state.clear()
@@ -277,7 +303,7 @@ def register(dp, clean):
             return
         if monotonic() - data["at"] >= cfg.data_ttl:
             await state.clear()
-            reply(message, guard, uid, "Срок операции истёк.", reply_markup=markup("home"))
+            reply(message, guard, uid, "Срок операции истёк.", reply_markup=markup("home", policy=guard.features))
             return
         text = message.text or ""
         cmd, _, arg = text.partition(" ")
@@ -306,8 +332,17 @@ def register(dp, clean):
 
     async def submit(message, state, guard, uid, data, source):
         cfg = guard.settings
-        runtime = guard.state(uid)
         mode, nonce = data["mode"], data["nonce"]
+        sources = (data["first"], source) if "first" in data else (source,)
+        kinds = tuple(item["kind"] for item in sources)
+
+        def permitted(policy):
+            return policy.permits(mode, *kinds)
+
+        if not permitted(guard.features):
+            reply(message, guard, uid, DISABLED)
+            return
+        runtime = guard.state(uid)
         if runtime is None:
             return
         if mode == "ref" and "first" not in data:
@@ -326,7 +361,6 @@ def register(dp, clean):
                 reply(message, guard, uid, "Подожди немного и повтори.")
             return
 
-        sources = (data["first"], source) if "first" in data else (source,)
         options = tuple(dict(item["opts"]) for item in sources)
         bot, chat_id = message.bot, message.chat.id
         loop = asyncio.get_running_loop()
@@ -394,10 +428,16 @@ def register(dp, clean):
                         outputs.append(BufferedInputFile(b64decode(out["data"]), filename="Результат." + out["kind"]))
                 total = len(outputs)
                 processed = True
-                repeat = remember(runtime.repeats, (mode, options[0], options[-1] if len(options) == 2 else {}))
+                actions = []
+                policy = guard.features
+                if permitted(policy):
+                    repeat = remember(runtime.repeats, (mode, options[0], options[-1] if len(options) == 2 else {}, kinds))
+                    actions.append(("Повторить", f"again:{repeat}"))
+                if policy.data:
+                    actions.append(("Обработка данных", "data:home"))
                 report = result["report"] + f"\nСообщений с результатом: {total}. Доставка результата отдельными сообщениями."
                 report_document = len(report.encode("utf-16-le")) > 8192
-                keyboard = keys(("Повторить", f"again:{repeat}"), ("Обработка данных", "data:home"))
+                keyboard = keys(*actions) if actions else None
                 await ensure_current()
                 timeout = remaining()
                 sending = True
@@ -437,9 +477,10 @@ def register(dp, clean):
             finally:
                 await clear_current(state, nonce)
 
-        if guard.heavy.submit(uid, run, long=True, expires=deadline, on_expire=expired):
+        if guard.submit_feature(uid, run, permitted, on_disabled=lambda: clear_current(state, nonce),
+                                long=True, expires=deadline, on_expire=expired):
             guard.limit(runtime, "heavy", cfg.clean_cooldown)
             # В очереди остаётся одна копия входных данных, FSM удерживает только идентификатор.
-            await state.set_data({"mode": mode, "nonce": nonce, "at": data["at"], "opts": {}})
+            await state.set_data({"mode": mode, "nonce": nonce, "at": data["at"], "opts": {}, "kinds": kinds})
         elif guard.warning(runtime, "queue", cfg.warning_interval):
             reply(message, guard, uid, "Очередь заполнена. Попробуй позже.")

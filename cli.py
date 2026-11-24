@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 from branding import BOT_NAME
+from features import DEFAULT_FEATURES, FEATURES_PATH, GROUPS, load_features, parse_features
 from deployment import (
     APP_DIR, SERVICE, DeploymentError, maintenance_lock, service_active, update, start_and_check, remote_revision, release_label,
 )
@@ -41,10 +42,10 @@ def configured() -> bool:
     return False
 
 
-def invoke(command: list[str]) -> bool:
+def invoke(command: list[str], *, timeout=None) -> bool:
     """Run trusted commands with argv (no shell interpolation)."""
     try:
-        return subprocess.run(command, check=False).returncode == 0
+        return subprocess.run(command, check=False, timeout=timeout).returncode == 0
     except FileNotFoundError:
         print(f"Команда не найдена: {command[0]}")
         return False
@@ -89,9 +90,9 @@ def run_tests() -> None:
     ])
 
 
-def update_from_github() -> bool:
+def update_from_github(expected=None) -> bool:
     try:
-        update(configured=configured)
+        update(configured=configured, expected=expected)
     except (EOFError, KeyboardInterrupt):
         print("\nОбновление отменено.")
         return False
@@ -149,7 +150,7 @@ def atomic(path, content):
             temp.unlink(missing_ok=True)
 
 
-def apply_settings(changes, token=None, launch=False):
+def apply_settings(changes, token=None, launch=False, *, report=print):
     # Caller holds the shared maintenance lock throughout read, edit and activation.
     previous = {}
     writes = {}
@@ -185,9 +186,43 @@ def apply_settings(changes, token=None, launch=False):
             start_and_check()
         elif launch:
             invoke(["systemctl", "stop", SERVICE])
-        print("Возвращены предыдущие настройки.")
+        report("Возвращены предыдущие настройки.")
         raise
-    print("Настройки сохранены." + (" Служба запущена." if launch or was_active else ""))
+    report("Настройки сохранены." + (" Служба запущена." if launch or was_active else ""))
+
+
+def save_features(options, baseline):
+    candidate = parse_features(options)
+    with maintenance_lock():
+        if load_features(FEATURES_PATH) != baseline:
+            raise DeploymentError("Настройки функций изменились. Открой раздел заново.")
+        encoded = json.dumps(candidate.options(), indent=2).encode("utf-8") + b"\n"
+        atomic(FEATURES_PATH, encoded)
+    return candidate
+
+
+def feature_menu():
+    baseline = load_features(FEATURES_PATH)
+    options = baseline.options()
+    items = [item for _, pairs in GROUPS for item in pairs]
+    while True:
+        for index, (key, label) in enumerate(items, 1):
+            status = "ВКЛ" if options[key] else "ВЫКЛ"
+            print(f"{index:2} · {status} · {label}")
+        if not sys.stdin.isatty():
+            return
+        choice = input("Номер — переключить, с — сохранить, в — включить всё, 0 — назад: ").strip().lower()
+        if choice == "0":
+            return
+        if choice == "в":
+            options = DEFAULT_FEATURES.options()
+        elif choice == "с" and confirm("Применить доступность функций?"):
+            save_features(options, baseline)
+            print("Настройки применяются без перезапуска.")
+            return
+        elif choice in {str(index) for index in range(1, len(items) + 1)}:
+            key = items[int(choice) - 1][0]
+            options[key] = not options[key]
 
 
 def uid(text):
@@ -302,6 +337,7 @@ def diagnostics():
     python = APP_DIR / ".venv/bin/python"
     def settings_check():
         load_settings()
+        load_features(FEATURES_PATH)
         return configured()
     def db_check():
         with closing(database()) as conn:
@@ -335,7 +371,7 @@ def diagnostics():
 def service(action):
     if action != "stop" and not configured():
         raise ValueError("Сначала настрой токен в мастере.")
-    if not invoke(["systemctl", action, SERVICE]):
+    if not invoke(["systemctl", action, SERVICE], timeout=110):
         return False
     return service_active() == (action != "stop")
 
@@ -352,7 +388,7 @@ def dispatch(action):
                 print("Выполнено." if ok else "Служба не подтвердила действие. Проверь журнал.")
                 return ok
     else:
-        return {"update": update_from_github, "settings": settings_menu, "logs": logs,
+        return {"update": update_from_github, "settings": settings_menu, "features": feature_menu, "logs": logs,
                 "follow": lambda: logs(True), "test": run_tests, "diagnose": diagnostics,
                 "status": lambda: invoke(["systemctl", "status", SERVICE, "--no-pager"])}[action]()
 
@@ -369,30 +405,44 @@ def run(action):
 def menu():
     if not configured() and confirm("Начать первоначальную настройку?"):
         run("setup")
-    actions = ["setup", "start", "stop", "restart", "settings", "logs", "backup", "diagnose", "update"]
+    actions = ["setup", "start", "stop", "restart", "settings", "logs", "backup", "diagnose", "update", "features"]
     while True:
         dashboard()
         print("\nУправление   1 Мастер настройки   2 Запустить   3 Остановить   4 Перезапустить"
               "\nНастройки    5 Токен, владелец, доступ и ограничения"
-              "\nОбслуживание 6 Журнал   7 Резервная копия   8 Диагностика\n             9 Обновить из GitHub   0 Выход")
+              "\nОбслуживание 6 Журнал   7 Резервная копия   8 Диагностика\n             9 Обновить из GitHub   10 Функциональность   0 Выход")
         choice = input("Выбор: ").strip()
         if choice == "0":
             return
-        if choice in list("123456789") and len(choice) == 1:
+        if choice in [str(index) for index in range(1, 11)]:
             run(actions[int(choice)-1])
 
 
 def main():
     parser = argparse.ArgumentParser(description=BOT_NAME)
-    parser.add_argument("action", nargs="?", default="menu", choices="menu setup owner settings token start stop restart status logs follow test diagnose backup update".split())
-    action = parser.parse_args().action
+    parser.add_argument("action", nargs="?", default="menu", choices="menu setup owner settings features token start stop restart status logs follow test diagnose backup update".split())
+    parser.add_argument("--expected-revision", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    action = args.action
     if os.geteuid() != 0:
         print("Используй sudo numberbot.")
         return 1
     try:
         if action == "menu":
-            menu()
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                print("Используй интерактивный терминал или прямую команду sudo numberbot --help.")
+                return 1
+            try:
+                from tui import launch
+                launch()
+            except (ImportError, RuntimeError) as error:
+                print(f"Панель недоступна в этом терминале. Открываю текстовое меню. {error}")
+                menu()
             return 0
+        if args.expected_revision is not None:
+            if action != "update" or not re.fullmatch(r"[0-9a-f]{40}", args.expected_revision):
+                parser.error("Некорректная ревизия обновления.")
+            return 0 if update_from_github(args.expected_revision) else 1
         return 0 if run(action) else 1
     except (EOFError, KeyboardInterrupt):
         print("\nОтменено.")
