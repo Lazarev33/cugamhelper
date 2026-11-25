@@ -1,6 +1,33 @@
 # Помощник 2 смены
 
-Telegram-бот для сотрудников склада. Версия v2.7.6. Поддерживаются Ubuntu и Debian с systemd, Python 3.10+ и aiogram 3.x.
+Telegram-бот для сотрудников склада. Кандидат v3.0.0. Поддерживаются Ubuntu и Debian с systemd, Python 3.10+ и aiogram 3.x.
+
+## Cugam Helper Control Center и API
+
+Серверный выпуск добавляет закрытую веб-панель, версионированный API и отправку отчётов НСУ из будущего Android-клиента в подтверждённый Telegram-чат. На VPS работают две независимые службы. Штатная команда поддерживаемого обновления — `sudo numberbot update`.
+
+### Локальный доступ и первый вход
+
+После установки проверь API командой `sudo numberbot api-status`. На клиентском компьютере открой SSH-туннель:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 <пользователь>@<VPS>
+```
+
+Открой `http://localhost:8765`. В интерактивной консоли VPS выполни `sudo numberbot web-access` и введи выданный одноразовый код в форму владельца. Он действует пять минут. В дальнейшем администратор может войти через Telegram по ID и подтверждению в личном чате. Сотрудники управляют своими устройствами по команде `/devices`.
+
+### Внешний домен и HTTPS
+
+Направь DNS на VPS и разреши входящие TCP 80/443 для Caddy. Используй Caddy с поддержкой директивы `request_body` (2.10+). API продолжает слушать loopback.
+
+```bash
+sudo numberbot api-config --host <домен> --port 8765
+sudo numberbot proxy
+```
+
+Добавь полученный сайт к существующей конфигурации Caddy, не затирая другие сайты. Для обычной установки Caddy проверь конфигурацию через `sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` и примени `sudo systemctl reload caddy`. Открой `https://<домен>` и проверь `/api/v1/health`. Команда `sudo numberbot api-status` проверяет локальный API. При наличии корпоративного прокси проверь, что он удаляет неподтверждённые forwarded headers и не пишет рабочие тела запросов на диск. Сброс к SSH-туннелю — `sudo numberbot api-config --host localhost --port 8765`.
+
+Архитектура и процедуры отката описаны в [ARCHITECTURE.md](docs/ARCHITECTURE.md). Контракт [REST API](docs/API.md), [OpenAPI JSON](docs/openapi.json), [Android-интеграция](docs/ANDROID_INTEGRATION.md) и [модель безопасности](docs/SECURITY.md) входят в комплект.
 
 ## Быстрый старт и переход с v2.4.0
 

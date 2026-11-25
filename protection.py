@@ -3,6 +3,7 @@
 import asyncio
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+from contextvars import ContextVar
 import logging
 from math import ceil
 from secrets import token_hex
@@ -15,6 +16,7 @@ from settings import Settings
 from features import DEFAULT_FEATURES
 
 LOG = logging.getLogger(__name__)
+send_permission = ContextVar("export_send_permission", default=None)
 CHAT_REQUESTS = (SendMessage, SendPhoto, SendDocument, EditMessageText, EditMessageCaption)
 
 
@@ -97,7 +99,8 @@ class Outgoing:
         deadline = self.clock() + self.settings.send_timeout
         for attempt in range(self.settings.retry_attempts + 1):
             remaining = await self.reserve(method, deadline)
-            if self.allowed and not self.allowed(method.chat_id):
+            permission = send_permission.get()
+            if (permission and not permission()) or (self.allowed and not self.allowed(method.chat_id)):
                 raise asyncio.CancelledError
             try:
                 return await request(bot, method, timeout=min(8, remaining))

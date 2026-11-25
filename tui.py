@@ -34,6 +34,7 @@ ROOT_ITEMS = (
     ("storage", "Хранилище и резервные копии", "Данные SQLite и согласованное копирование"),
     ("diagnostics", "Диагностика и журналы", "Состояние компонентов и журнал службы"),
     ("update", "Обновление", "Проверка и установка релиза по HTTPS"),
+    ("infrastructure", "API и веб-панель", "Состояние API, домен, порт и доступ владельца"),
 )
 
 LIMIT_GROUPS = (
@@ -152,7 +153,7 @@ def snapshot():
     except (OSError, ValueError):
         pass
     try:
-        data.enabled_features = sum(load_features(cli.FEATURES_PATH).options().values())
+        data.enabled_features = sum(cli.read_feature_policy().options().values())
     except (OSError, ValueError):
         pass
     try:
@@ -345,7 +346,7 @@ class ControlPanel:
 
     def open(self, name):
         if name == "features":
-            self.baseline = load_features(cli.FEATURES_PATH)
+            self.baseline = cli.read_feature_policy()
             self.options = self.baseline.options()
         elif name == "live":
             self.live_due = 0
@@ -516,6 +517,20 @@ class ControlPanel:
                 Entry("Управление автозапуском", startup, "Меняет включение службы при загрузке VPS"),
             ], [f"Служба  {VERSION_LABELS.get(info.active, info.active)}", f"Время работы  {uptime_label(info.uptime)}",
                 f"Автозапуск  {info.startup or '—'}"]
+        if name == "infrastructure":
+            host, port = cli.api_settings()
+            def domain():
+                self.field("Домен API", f"Текущий адрес: {host}", lambda value: self.operation(
+                    "Настройка API", lambda emit: run_command("api-config", "--host", value, "--port", str(port), emit=emit)))
+            def endpoint():
+                self.field("Порт API", f"Текущий порт: {port}", lambda value: self.operation(
+                    "Настройка API", lambda emit: run_command("api-config", "--host", host, "--port", value, emit=emit)))
+            return ([act("Проверить API", "api-status"), act("Запустить API", "api-start"),
+                     act("Остановить API", "api-stop", confirmed=True),
+                     Entry("Настроить домен", domain), Entry("Настроить порт", endpoint),
+                     act("Показать конфигурацию Caddy", "proxy")],
+                    ["API слушает только loopback.", "Код входа владельца: sudo numberbot web-access.",
+                     "Список устройств доступен в Control Center и через /devices."])
         if name == "features":
             draft = parse_features(self.options)
             entries = []

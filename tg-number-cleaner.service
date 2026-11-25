@@ -19,6 +19,8 @@ RestartSec=5
 UMask=0077
 StateDirectory=tg-number-cleaner
 StateDirectoryMode=0700
+RuntimeDirectory=tg-number-cleaner
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777
 TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777

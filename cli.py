@@ -17,9 +17,10 @@ import sys
 import tempfile
 
 from branding import BOT_NAME
+from infra_features import common_features, feature_database, revision, write_common
 from features import DEFAULT_FEATURES, FEATURES_PATH, GROUPS, load_features, parse_features
 from deployment import (
-    APP_DIR, SERVICE, DeploymentError, maintenance_lock, service_active, update, start_and_check, remote_revision, release_label,
+    APP_DIR, SERVICE, API_SERVICE, api_probe, api_settings, start_api_and_check, CONFIG_DIR, DeploymentError, maintenance_lock, service_active, update, start_and_check, remote_revision, release_label,
 )
 
 ENV_FILE = Path("/etc/tg-number-cleaner/bot.env")
@@ -191,9 +192,16 @@ def apply_settings(changes, token=None, launch=False, *, report=print):
     report("Настройки сохранены." + (" Служба запущена." if launch or was_active else ""))
 
 
+def read_feature_policy():
+    with feature_database(DB) as conn:
+        return common_features(conn, lambda: load_features(FEATURES_PATH)) if conn else load_features(FEATURES_PATH)
+
+
 def save_features(options, baseline):
     candidate = parse_features(options)
-    with maintenance_lock():
+    with maintenance_lock(), feature_database(DB) as conn:
+        if conn:
+            return write_common(conn, options, revision(baseline.options()), lambda: load_features(FEATURES_PATH))
         if load_features(FEATURES_PATH) != baseline:
             raise DeploymentError("Настройки функций изменились. Открой раздел заново.")
         encoded = json.dumps(candidate.options(), indent=2).encode("utf-8") + b"\n"
@@ -202,7 +210,7 @@ def save_features(options, baseline):
 
 
 def feature_menu():
-    baseline = load_features(FEATURES_PATH)
+    baseline = read_feature_policy()
     options = baseline.options()
     items = [item for _, pairs in GROUPS for item in pairs]
     while True:
@@ -337,7 +345,7 @@ def diagnostics():
     python = APP_DIR / ".venv/bin/python"
     def settings_check():
         load_settings()
-        load_features(FEATURES_PATH)
+        read_feature_policy()
         return configured()
     def db_check():
         with closing(database()) as conn:
@@ -352,6 +360,7 @@ def diagnostics():
         ("Настройки и токен (открой мастер)", settings_check),
         ("Служба (посмотри журнал)", service_active),
         ("SQLite (проверь запуск службы)", db_check),
+        ("API на loopback (проверь службу cugam-api)", api_probe),
         ("Файлы релиза (переустанови выпуск)", lambda: all((APP_DIR / p).is_file() for p in (APP_DIR / "deploy-files.txt").read_text().splitlines())),
         ("Python и библиотеки (переустанови выпуск)", lambda: invoke([str(python), "-c", "import sys, aiogram, barcode, PIL, zxingcpp, dotenv, openpyxl, docx, lxml; sys.exit(sys.version_info < (3,10))"])),
         ("GitHub (проверь HTTPS)", remote_revision),
@@ -376,7 +385,54 @@ def service(action):
     return service_active() == (action != "stop")
 
 
+def api_config(host, port):
+    if (host != "localhost" and ("." not in host or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part) for part in host.split(".")))) or not 1024 <= port <= 65535:
+        raise ValueError("Укажи корректный домен или localhost и порт 1024–65535.")
+    path = CONFIG_DIR / "api.env"
+    with maintenance_lock():
+        before = path.read_bytes() if path.exists() else None
+        try:
+            atomic(path, f"CUGAM_HOST={host}\nCUGAM_PORT={port}\n".encode("ascii"))
+            start_api_and_check()
+        except (OSError, subprocess.SubprocessError, DeploymentError):
+            atomic(path, before)
+            start_api_and_check()
+            raise
+    print("API запущен. Конфигурация сохранена.")
+
+
+def infra_action(action):
+    if action == "api-status":
+        host, port = api_settings()
+        ready = api_probe()
+        print("API доступен" if ready else "API не ответил", f"· {host}, внутренний порт {port}")
+        return ready
+    if action == "proxy":
+        host, port = api_settings()
+        if host == "localhost":
+            raise ValueError("Сначала задай внешний домен через sudo numberbot api-config.")
+        print(f"""{host} {{
+    request_body {{
+        max_size 524288
+    }}
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy 127.0.0.1:{port}
+}}""")
+        return True
+    if action == "web-access":
+        return invoke([str(APP_DIR / ".venv/bin/python"), str(APP_DIR / "infra_admin.py")], timeout=10)
+    with maintenance_lock():
+        if action == "api-start":
+            start_api_and_check()
+            print("API отвечает.")
+            return True
+        return invoke(["systemctl", "stop", API_SERVICE], timeout=20)
+
+
 def dispatch(action):
+    if action in {"api-status", "api-start", "api-stop", "web-access", "proxy"}:
+        return infra_action(action)
     if action in {"start", "restart", "stop", "setup", "owner", "token", "backup"}:
         with maintenance_lock():
             if action == "backup":
@@ -420,8 +476,10 @@ def menu():
 
 def main():
     parser = argparse.ArgumentParser(description=BOT_NAME)
-    parser.add_argument("action", nargs="?", default="menu", choices="menu setup owner settings features token start stop restart status logs follow test diagnose backup update".split())
+    parser.add_argument("action", nargs="?", default="menu", choices="menu setup owner settings features token start stop restart status logs follow test diagnose backup update api-status api-start api-stop api-config web-access proxy".split())
     parser.add_argument("--expected-revision", help=argparse.SUPPRESS)
+    parser.add_argument("--host")
+    parser.add_argument("--port", type=int)
     args = parser.parse_args()
     action = args.action
     if os.geteuid() != 0:
@@ -439,6 +497,17 @@ def main():
                 print(f"Панель недоступна в этом терминале. Открываю текстовое меню. {error}")
                 menu()
             return 0
+        if action == "api-config":
+            try:
+                old_host, old_port = api_settings()
+                host = args.host or (input(f"Домен [{old_host}]: ").strip() or old_host if sys.stdin.isatty() else old_host)
+                port = args.port if args.port is not None else (int(input(f"Порт [{old_port}]: ").strip() or old_port)
+                                                               if sys.stdin.isatty() else old_port)
+                api_config(host.lower(), port)
+                return 0
+            except (OSError, ValueError, subprocess.SubprocessError, DeploymentError) as error:
+                print("Настройка API не применена.", error, file=sys.stderr)
+                return 1
         if args.expected_revision is not None:
             if action != "update" or not re.fullmatch(r"[0-9a-f]{40}", args.expected_revision):
                 parser.error("Некорректная ревизия обновления.")

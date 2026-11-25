@@ -29,10 +29,14 @@ from parser import clean_numbers, chunks
 from private_process import disable_core_dumps
 from protection import Protection, UserState
 from settings import load_settings
-from features import DEFAULT_FEATURES, FeatureStore
+from features import DEFAULT_FEATURES
+from infrastructure import Infrastructure, IntegrationFeatures
+from infrastructure_bot import register as register_infrastructure
+from telegram_bridge import listen
 
 
 dp = Dispatcher(storage=DialogStorage())
+register_infrastructure(dp)
 MAIN_TEXT = f"{BOT_NAME}\nВыбери рабочий инструмент."
 CLEAN_TEXT = (
     "Очистка номеров\nОтправь номера по одному в строке. Можно добавить дату, например 26008178-03.11.2026. "
@@ -502,7 +506,11 @@ async def main() -> None:
             return result
 
         # Получение профиля проверяет токен до запуска цикла polling.
-        await bot.me()
+        profile = await bot.me()
+        infrastructure = Infrastructure(location / "catalog.sqlite3")
+        infrastructure.prepare()
+        with infrastructure.repository() as data, data.transaction():
+            infrastructure.put_meta(data, "bot_username", profile.username or "")
         for lang in (None, "ru"):
             try:
                 await bot.set_my_name(name=BOT_NAME, language_code=lang, request_timeout=5)
@@ -514,28 +522,46 @@ async def main() -> None:
                 BotCommand(command="menu", description="Главное меню"),
                 BotCommand(command="help", description="Помощь"),
                 BotCommand(command="cancel", description="Отменить действие"),
+                BotCommand(command="devices", description="Подключённые устройства"),
             ], request_timeout=5)
         except TelegramAPIError as error:
             logging.warning("Не удалось задать команды бота: %s", type(error).__name__)
-        guard = Protection(settings, feature_store=FeatureStore())
+        guard = Protection(settings, feature_store=IntegrationFeatures(infrastructure).telegram())
         guard.outgoing.allowed = repo.allowed
         if repo.owner is None:
             logging.warning("Доступ закрыт. Назначь владельца через sudo numberbot owner.")
         bot.session.middleware.register(guard.outgoing)
+        bridge = await listen(infrastructure, bot, guard.feature_store)
+
         async def watch_features():
+            seq = repo.db.execute("SELECT coalesce(max(seq),0) FROM infra_revocations").fetchone()[0]
             while True:
                 await asyncio.sleep(1)
                 guard.sync_features(dp.storage)
+                keys = tuple(dp.storage.storage)
+                users = set(guard.users) | set(guard.handlers) | {key.user_id for key in keys}
+                changes = repo.db.execute("SELECT seq,uid FROM infra_revocations WHERE seq>? ORDER BY seq", (seq,)).fetchall()
+                revoked = {change["uid"] for change in changes}
+                if changes:
+                    seq = changes[-1]["seq"]
+                for uid in users:
+                    if uid in revoked or not repo.allowed(uid):
+                        guard.revoke(uid)
+                        for key in keys:
+                            if key.user_id == uid:
+                                dp.storage.remove(key)
 
         watcher = asyncio.create_task(watch_features())
         try:
             await dp.start_polling(
-                bot, repo=repo, guard=guard, close_bot_session=False,
+                bot, repo=repo, guard=guard, infrastructure=infrastructure, close_bot_session=False,
                 tasks_concurrency_limit=32, allowed_updates=["message", "callback_query"],
             )
         finally:
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
+            if bridge:
+                await bridge.cleanup()
             await guard.close()
             repo.close()
 
