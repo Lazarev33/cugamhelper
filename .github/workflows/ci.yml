@@ -1,0 +1,23 @@
+name: Cugam Helper CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: bash -n install.sh
+      - run: python -m unittest discover -v
+      - run: python -m compileall -q .
+      - run: python -c "import json; from infrastructure_api import create_app; assert json.load(open('docs/openapi.json')) == create_app().openapi()"

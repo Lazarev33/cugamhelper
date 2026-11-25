@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 import fcntl
+import http.client
 import os
 from pathlib import Path
 import re
@@ -11,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 
 APP_DIR = Path("/opt/tg-number-cleaner")
@@ -18,12 +20,14 @@ RELEASES = Path("/opt/tg-number-cleaner-releases")
 CONFIG_DIR = Path("/etc/tg-number-cleaner")
 SERVICE = "tg-number-cleaner.service"
 UNIT_FILE = Path("/etc/systemd/system") / SERVICE
+API_SERVICE = "cugam-api.service"
+API_UNIT = Path("/etc/systemd/system") / API_SERVICE
 CLI_LINK = Path("/usr/local/bin/numberbot")
 LOCK_FILE = CONFIG_DIR / "maintenance.lock"
 REMOTE = "https://github.com/Lazarev33/cugamhelper.git"
 BRANCH = "refs/heads/main"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
-RELEASE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+RELEASE_FILE = re.compile(r"(?:docs/)?[A-Za-z0-9][A-Za-z0-9_.-]*")
 REQUIRED_FILES = {
     "VERSION", "bot.py", "branding.py", "parser.py", "barcodes.py", "barcodes.json",
     "cli.py", "deployment.py", "requirements.txt", SERVICE,
@@ -142,10 +146,13 @@ def stage_release(source: Path, candidate: Path, revision: str | None) -> None:
         raise DeploymentError("В манифесте отсутствуют обязательные файлы установки.")
     for name in files:
         original = source / name
-        if not RELEASE_FILE.fullmatch(name) or original.is_symlink() or not original.is_file():
+        if (not RELEASE_FILE.fullmatch(name) or original.is_symlink() or not original.is_file()
+                or not original.resolve().is_relative_to(source.resolve())):
             raise DeploymentError(f"Некорректный файл сборки: {name!r}")
-        shutil.copyfile(original, candidate / name)
-        (candidate / name).chmod(0o755 if name == "cli.py" else 0o644)
+        target = candidate / name
+        target.parent.mkdir(exist_ok=True)
+        shutil.copyfile(original, target)
+        target.chmod(0o755 if name == "cli.py" else 0o644)
     if revision:
         (candidate / "REVISION").write_text(revision + "\n", encoding="ascii")
     checked([sys.executable, "-m", "venv", candidate / ".venv"], timeout=180)
@@ -165,15 +172,16 @@ def replace_link(path: Path, target: Path) -> None:
         pending.replace(path)
 
 
-def write_unit(content: bytes | None) -> None:
+def write_unit(content: bytes | None, *, path=None) -> None:
+    path = UNIT_FILE if path is None else path
     if content is None:
-        UNIT_FILE.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
         return
-    with tempfile.TemporaryDirectory(prefix=".numberbot-", dir=UNIT_FILE.parent) as work:
+    with tempfile.TemporaryDirectory(prefix=".numberbot-", dir=path.parent) as work:
         pending = Path(work) / SERVICE
         pending.write_bytes(content)
         pending.chmod(0o644)
-        pending.replace(UNIT_FILE)
+        pending.replace(path)
 
 
 def start_and_check() -> None:
@@ -184,9 +192,55 @@ def start_and_check() -> None:
         raise DeploymentError("Служба завершилась до проверки готовности.")
 
 
+def api_settings():
+    path = CONFIG_DIR / "api.env"
+    settings = {"CUGAM_HOST": "localhost", "CUGAM_PORT": "8765"}
+    if path.is_file():
+        for line in path.read_text(encoding="ascii").splitlines():
+            key, value = line.split("=", 1)
+            if key not in settings:
+                raise DeploymentError("В api.env обнаружена неизвестная настройка.")
+            settings[key] = value
+    host, port = settings["CUGAM_HOST"], settings["CUGAM_PORT"]
+    if not re.fullmatch(r"[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?", host) or not port.isdigit() or not 1024 <= int(port) <= 65535:
+        raise DeploymentError("Проверь имя хоста и порт API.")
+    return host, int(port)
+
+
+def api_probe():
+    host, port = api_settings()
+    with_connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        with_connection.request("GET", "/api/v1/health", headers={
+            "Host": host, "X-Forwarded-Proto": "https",
+        })
+        response = with_connection.getresponse()
+        return response.status == 200 and response.read(256) == b'{"status":"ok"}'
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        with_connection.close()
+
+
+def start_api_and_check():
+    systemctl("restart", API_SERVICE)
+    end = time.monotonic() + 14
+    while time.monotonic() < end:
+        if api_probe():
+            return
+        time.sleep(0.25)
+    raise DeploymentError("API не подтвердил запуск по loopback.")
+
+
 def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
     old_unit = UNIT_FILE.read_bytes() if UNIT_FILE.exists() else None
     new_unit = (candidate / SERVICE).read_bytes()
+    api_file = candidate / API_SERVICE
+    new_api = api_file.read_bytes() if api_file.is_file() else None
+    old_api = API_UNIT.read_bytes() if (new_api is not None and API_UNIT.exists()) else None
+    api_was_active = bool(old_api and subprocess.run(
+        ["systemctl", "is-active", "--quiet", API_SERVICE], check=False, timeout=10).returncode == 0)
+    api_changed = api_started = api_enabled = api_stopped = False
     was_active = service_active()
     old_target = APP_DIR.resolve(strict=True) if APP_DIR.is_symlink() else None
     old_cli_target = CLI_LINK.readlink() if CLI_LINK.is_symlink() else None
@@ -202,6 +256,9 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
     enabled = False
     with protect_switch():
         try:
+            if old_api:
+                systemctl("stop", API_SERVICE)
+                api_stopped = True
             if old_unit is not None:
                 systemctl("stop", SERVICE)
             if old_target is None and APP_DIR.exists():
@@ -212,7 +269,17 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
             if new_unit != old_unit:
                 write_unit(new_unit)
                 unit_changed = True
+            if new_api is not None and new_api != old_api:
+                write_unit(new_api, path=API_UNIT)
+                api_changed = True
+            if unit_changed or api_changed:
                 systemctl("daemon-reload")
+            if new_api is not None and (old_api is None or api_was_active):
+                api_started = True
+                start_api_and_check()
+                if old_api is None:
+                    api_enabled = True
+                    systemctl("enable", API_SERVICE)
             if start_service:
                 start_and_check()
             if install:
@@ -229,6 +296,13 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                     systemctl("stop", SERVICE)
             except (OSError, subprocess.SubprocessError):
                 print("systemd не подтвердил остановку новой версии.", file=sys.stderr)
+            if api_started:
+                try:
+                    systemctl("stop", API_SERVICE)
+                except (OSError, subprocess.SubprocessError):
+                    print("systemd не подтвердил остановку нового API.", file=sys.stderr)
+            if api_enabled:
+                systemctl("disable", API_SERVICE)
             if enabled and old_unit is None:
                 systemctl("disable", SERVICE)
             if cli_changed:
@@ -248,9 +322,14 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                     replace_link(APP_DIR, old_target)
             if unit_changed:
                 write_unit(old_unit)
+            if api_changed:
+                write_unit(old_api, path=API_UNIT)
+            if unit_changed or api_changed:
                 systemctl("daemon-reload")
             if was_active:
                 start_and_check()
+            if api_stopped and api_was_active:
+                start_api_and_check()
             if old_target is not None or APP_DIR.exists():
                 raise DeploymentError("Восстановлена предыдущая установка. Проверь журнал службы.") from None
             raise DeploymentError("Установка не завершена. Проверь журнал службы.") from None

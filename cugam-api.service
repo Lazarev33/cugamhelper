@@ -1,0 +1,35 @@
+[Unit]
+Description=Cugam Helper API и Control Center
+After=network.target
+
+[Service]
+Type=exec
+User=tgnumclean
+Group=tgnumclean
+WorkingDirectory=/opt/tg-number-cleaner
+EnvironmentFile=-/etc/tg-number-cleaner/api.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/tg-number-cleaner/.venv/bin/python /opt/tg-number-cleaner/infrastructure_api.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+StateDirectory=tg-number-cleaner
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+NoNewPrivileges=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+InaccessiblePaths=-/etc/tg-number-cleaner/bot.env
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777
+TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777
+MemorySwapMax=0
+LimitCORE=0
+CoredumpFilter=0x0
+
+[Install]
+WantedBy=multi-user.target
