@@ -1,9 +1,13 @@
 """Установка и ручное обновление бота с откатом к рабочей версии."""
 
 import argparse
+import platform
+import pwd
 from contextlib import contextmanager
 import fcntl
 import http.client
+import json
+import socket
 import os
 from pathlib import Path
 import re
@@ -14,6 +18,11 @@ import sys
 import tempfile
 import time
 
+from build_release import isolated_build, freeze_tree
+from secure_release import (TRUST, CHANNEL, ASSET, MANIFEST, SIGNATURE, MAX_ARCHIVE, MAX_MANIFEST,
+                            CLEAN_ENV, ReleaseError, validate_manifest, verify_bundle, check_floor,
+                            record_floor, safe_file)
+
 
 APP_DIR = Path("/opt/tg-number-cleaner")
 RELEASES = Path("/opt/tg-number-cleaner-releases")
@@ -22,10 +31,10 @@ SERVICE = "tg-number-cleaner.service"
 UNIT_FILE = Path("/etc/systemd/system") / SERVICE
 API_SERVICE = "cugam-api.service"
 API_UNIT = Path("/etc/systemd/system") / API_SERVICE
+WORKER_SOCKET = "cugam-document.socket"
+WORKER_FILES = (WORKER_SOCKET, "cugam-document@.service", "cugam-retention.service", "cugam-retention.timer")
 CLI_LINK = Path("/usr/local/bin/numberbot")
 LOCK_FILE = CONFIG_DIR / "maintenance.lock"
-REMOTE = "https://github.com/Lazarev33/cugamhelper.git"
-BRANCH = "refs/heads/main"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 RELEASE_FILE = re.compile(r"(?:docs/)?[A-Za-z0-9][A-Za-z0-9_.-]*")
 REQUIRED_FILES = {
@@ -94,49 +103,66 @@ def release_label(path: Path) -> str:
     return f"{label} ({revision[:12]})" if revision else f"{label} (без ревизии)"
 
 
-def git_environment() -> dict[str, str]:
-    return {
-        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_ALLOW_PROTOCOL": "https",
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "http.followRedirects",
-        "GIT_CONFIG_VALUE_0": "false",
-        "GIT_TERMINAL_PROMPT": "0",
-    }
+def download_asset(name, target, limit):
+    if name not in {ASSET, MANIFEST, SIGNATURE}:
+        raise DeploymentError("Неизвестный артефакт выпуска.")
+    # stdout получает root в приватный временный каталог; загрузчик не может заменить файл.
+    args = ["/usr/sbin/runuser", "-u", "cugambuild", "--", "/usr/bin/curl", "-q", "--fail", "--silent",
+            "--show-error", "--proto", "=https", "--proto-redir", "=https", "--location", "--max-redirs", "3",
+            "--max-time", "45", "--max-filesize", str(limit), CHANNEL + name]
+    with subprocess.Popen(args, stdout=subprocess.PIPE, env=CLEAN_ENV) as transfer, target.open("xb") as output:
+        try:
+            used = 0
+            while chunk := transfer.stdout.read(65536):
+                used += len(chunk)
+                if used > limit:
+                    raise DeploymentError("Загруженный файл превышает лимит.")
+                output.write(chunk)
+            if transfer.wait(timeout=5) != 0:
+                raise DeploymentError("Не удалось загрузить релиз по HTTPS.")
+        finally:
+            if transfer.poll() is None:
+                transfer.kill()
 
 
-def remote_revision() -> str:
-    env = git_environment()
-    try:
-        head = checked(["git", "ls-remote", "--exit-code", REMOTE, BRANCH], env=env, output=True)
-    except (subprocess.SubprocessError, OSError):
-        raise DeploymentError(
-            "GitHub недоступен. Проверь DNS, системное время, сертификаты и HTTPS-соединение VPS."
-        ) from None
-    revision = head.split("\t", 1)[0]
-    if not SHA_PATTERN.fullmatch(revision):
-        raise DeploymentError("GitHub вернул неизвестный формат ревизии.")
-    return revision
+def available_release(work):
+    download_asset(MANIFEST, work / MANIFEST, MAX_MANIFEST)
+    download_asset(SIGNATURE, work / SIGNATURE, 64)
+    result = validate_manifest(work / MANIFEST, work / SIGNATURE, TRUST)
+    installed = (APP_DIR / "VERSION").read_text().strip() if (APP_DIR / "VERSION").is_file() else None
+    check_floor(result, TRUST / "floor.json", installed)
+    return result
 
 
-def fetch_source(work: Path, revision: str) -> Path:
-    env = git_environment()
-    repo = work / "repo.git"
-    checked(["git", "init", "--bare", "--quiet", "--template=", repo], env=env)
-    git = ["git", "--git-dir", repo]
-    checked([*git, "fetch", "--quiet", "--depth=1", "--no-tags", REMOTE, BRANCH], env=env)
-    fetched = checked([*git, "rev-parse", "FETCH_HEAD"], env=env, output=True)
-    if fetched != revision:
-        raise DeploymentError("Ветка main изменилась после проверки. Запусти обновление ещё раз.")
-    archive = work / "source.tar"
-    checked([*git, "archive", "--output", archive, revision], env=env)
-    source = work / "source"
-    source.mkdir()
-    checked(["tar", "--extract", "--file", archive, "--directory", source,
-             "--no-same-owner", "--no-same-permissions"])
-    return source
+def remote_revision():
+    safe_file(TRUST, directory=True)
+    with tempfile.TemporaryDirectory(prefix="cugam-manifest-", dir=TRUST) as temp:
+        return available_release(Path(temp)).revision
+
+
+def install_host():
+    if sys.version_info[:2] not in {(3, 11), (3, 12), (3, 13)} or platform.machine() != "x86_64":
+        raise DeploymentError("Поддерживаются Linux x86_64 с системным Python 3.11–3.13.")
+    for user in ("tgnumclean", "cugamwork", "cugambuild"):
+        try:
+            pwd.getpwnam(user)
+        except KeyError:
+            checked(["/usr/sbin/useradd", "--system", "--user-group", "--home-dir", "/nonexistent",
+                     "--shell", "/usr/sbin/nologin", user])
+    for user in ("cugamwork", "cugambuild"):
+        isolated = pwd.getpwnam(user)
+        if (isolated.pw_uid == 0 or isolated.pw_shell != "/usr/sbin/nologin"
+                or set(os.getgrouplist(user, isolated.pw_gid)) != {isolated.pw_gid}
+                or isolated.pw_gid == pwd.getpwnam("tgnumclean").pw_gid):
+            raise DeploymentError("Для worker и сборщика нужны отдельные заблокированные пользователи.")
+    account = pwd.getpwnam("tgnumclean")
+    CONFIG_DIR.mkdir(exist_ok=True)
+    CONFIG_DIR.chmod(0o750)
+    os.chown(CONFIG_DIR, 0, account.pw_gid)
+    token = CONFIG_DIR / "bot.env"
+    if not token.exists():
+        with os.fdopen(os.open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640), "wb"):
+            os.chown(token, 0, account.pw_gid)
 
 
 def stage_release(source: Path, candidate: Path, revision: str | None) -> None:
@@ -146,7 +172,7 @@ def stage_release(source: Path, candidate: Path, revision: str | None) -> None:
         raise DeploymentError("В манифесте отсутствуют обязательные файлы установки.")
     for name in files:
         original = source / name
-        if (not RELEASE_FILE.fullmatch(name) or original.is_symlink() or not original.is_file()
+        if ((not RELEASE_FILE.fullmatch(name) and name != "cugam-document@.service") or original.is_symlink() or not original.is_file()
                 or not original.resolve().is_relative_to(source.resolve())):
             raise DeploymentError(f"Некорректный файл сборки: {name!r}")
         target = candidate / name
@@ -155,14 +181,22 @@ def stage_release(source: Path, candidate: Path, revision: str | None) -> None:
         target.chmod(0o755 if name == "cli.py" else 0o644)
     if revision:
         (candidate / "REVISION").write_text(revision + "\n", encoding="ascii")
-    checked([sys.executable, "-m", "venv", candidate / ".venv"], timeout=180)
-    python = candidate / ".venv/bin/python"
-    print("Установка зависимостей.")
-    checked([python, "-m", "pip", "--isolated", "install", "--disable-pip-version-check",
-             "-r", candidate / "requirements.txt"], timeout=600)
-    print("Запуск тестов релиза.")
-    checked([python, "-m", "unittest", "discover", "-s", candidate, "-p", "test_*.py", "-q"])
     candidate.chmod(0o755)
+    environment = candidate / ".venv"
+    environment.mkdir(mode=0o700)
+    account = pwd.getpwnam("cugambuild")
+    os.chown(environment, account.pw_uid, account.pw_gid)
+    python = environment / "bin/python"
+    isolated_build("cugambuild", ["/usr/bin/python3", "-m", "venv", "--copies", environment],
+                   writable=environment)
+    print("Установка колёс с проверкой SHA-256.")
+    isolated_build("cugambuild", [python, "-m", "pip", "--isolated", "install", "--require-hashes",
+                   "--only-binary=:all:", "--no-cache-dir", "-r", candidate / "requirements.lock"],
+                   writable=environment)
+    print("Непривилегированные тесты релиза.")
+    isolated_build("cugambuild", [python, "-m", "unittest", "discover", "-s", candidate, "-q"],
+                   writable=environment)
+    freeze_tree(environment)
 
 
 def replace_link(path: Path, target: Path) -> None:
@@ -232,7 +266,27 @@ def start_api_and_check():
     raise DeploymentError("API не подтвердил запуск по loopback.")
 
 
+def check_worker():
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(6)
+        connection.connect("/run/cugam-document.sock")
+        connection.sendall(b"H" + bytes((0, 0, 0, 1)) + b"1")
+        with connection.makefile("rb") as response:
+            size = int.from_bytes(response.read(4), "big")
+            if not 0 < size <= 64 or json.loads(response.read(size)) != {"status": "ok"}:
+                raise DeploymentError("Worker не подтвердил готовность по IPC.")
+
+
 def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
+    worker = {}
+    for name in WORKER_FILES:
+        source = candidate / name
+        if source.is_file():
+            target = UNIT_FILE.parent / name
+            worker[target] = (target.read_bytes() if target.is_file() else None, source.read_bytes())
+    worker_started = False
+    worker_enabled = False
+    worker_stopped = False
     old_unit = UNIT_FILE.read_bytes() if UNIT_FILE.exists() else None
     new_unit = (candidate / SERVICE).read_bytes()
     api_file = candidate / API_SERVICE
@@ -261,6 +315,9 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                 api_stopped = True
             if old_unit is not None:
                 systemctl("stop", SERVICE)
+            if worker and worker[UNIT_FILE.parent / WORKER_SOCKET][0] is not None:
+                systemctl("stop", WORKER_SOCKET)
+                worker_stopped = True
             if old_target is None and APP_DIR.exists():
                 legacy = Path(tempfile.mkdtemp(prefix="legacy-", dir=RELEASES))
                 APP_DIR.rename(legacy / "app")
@@ -272,8 +329,17 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
             if new_api is not None and new_api != old_api:
                 write_unit(new_api, path=API_UNIT)
                 api_changed = True
-            if unit_changed or api_changed:
+            for path, (_, content) in worker.items():
+                write_unit(content, path=path)
+            if unit_changed or api_changed or worker:
                 systemctl("daemon-reload")
+            if worker:
+                worker_started = True
+                systemctl("start", WORKER_SOCKET)
+                check_worker()
+                if not worker_stopped:
+                    worker_enabled = True
+                    systemctl("enable", WORKER_SOCKET)
             if new_api is not None and (old_api is None or api_was_active):
                 api_started = True
                 start_api_and_check()
@@ -289,7 +355,7 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                 enabled = True
             if legacy is not None or old_target is not None:
                 replace_link(previous, legacy / "app" if legacy else old_target)
-        except (OSError, subprocess.SubprocessError, DeploymentError) as error:
+        except (OSError, subprocess.SubprocessError, DeploymentError, ValueError) as error:
             print(f"Сбой переключения версии: {error}", file=sys.stderr)
             try:
                 if switched and (start_service or unit_changed):
@@ -301,10 +367,14 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                     systemctl("stop", API_SERVICE)
                 except (OSError, subprocess.SubprocessError):
                     print("systemd не подтвердил остановку нового API.", file=sys.stderr)
-            if api_enabled:
-                systemctl("disable", API_SERVICE)
-            if enabled and old_unit is None:
-                systemctl("disable", SERVICE)
+            for action, unit, needed in (
+                    ("stop", WORKER_SOCKET, worker_started), ("disable", WORKER_SOCKET, worker_enabled),
+                    ("disable", API_SERVICE, api_enabled), ("disable", SERVICE, enabled and old_unit is None)):
+                if needed:
+                    try:
+                        systemctl(action, unit)
+                    except (OSError, subprocess.SubprocessError):
+                        print("Не удалось выполнить очистку systemd для " + unit, file=sys.stderr)
             if cli_changed:
                 if old_cli_target is None:
                     CLI_LINK.unlink(missing_ok=True)
@@ -324,8 +394,12 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                 write_unit(old_unit)
             if api_changed:
                 write_unit(old_api, path=API_UNIT)
-            if unit_changed or api_changed:
+            for path, (previous_content, _) in worker.items():
+                write_unit(previous_content, path=path)
+            if unit_changed or api_changed or worker:
                 systemctl("daemon-reload")
+            if worker_stopped:
+                systemctl("start", WORKER_SOCKET)
             if was_active:
                 start_and_check()
             if api_stopped and api_was_active:
@@ -339,12 +413,17 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
             shutil.rmtree(obsolete, ignore_errors=True)
 
 
-def deploy(source: Path, revision: str | None, *, start_service: bool, install=False) -> None:
+def deploy(work, release, *, start_service, install=False):
     RELEASES.mkdir(mode=0o755, exist_ok=True)
+    safe_file(RELEASES, directory=True)
     candidate = Path(tempfile.mkdtemp(prefix="release-", dir=RELEASES))
     try:
-        stage_release(source, candidate, revision)
-        print("Переключение релиза и проверка службы.")
+        stage_release(work / "source", candidate, release.revision)
+        shutil.copyfile(work / MANIFEST, candidate / MANIFEST)
+        shutil.copyfile(work / SIGNATURE, candidate / SIGNATURE)
+        (candidate / "RELEASE_VERIFIED").write_text(release.version + " " + release.revision + "\n")
+        record_floor(release, TRUST / "floor.json")
+        print("Переключение проверенного релиза.")
         activate(candidate, start_service=start_service, install=install)
     finally:
         if APP_DIR.resolve() != candidate:
@@ -352,47 +431,50 @@ def deploy(source: Path, revision: str | None, *, start_service: bool, install=F
 
 
 def update(*, configured, expected=None) -> None:
-    with maintenance_lock():
+    safe_file(TRUST, directory=True)
+    with maintenance_lock(), tempfile.TemporaryDirectory(prefix="cugam-download-", dir=TRUST) as temp:
+        work = Path(temp)
+        try:
+            offered = available_release(work)
+            if expected is not None and offered.revision != expected:
+                raise DeploymentError("Подписанная ревизия изменилась. Повтори проверку.")
+            if offered.revision == revision_at(APP_DIR):
+                print("Установлена актуальная подписанная ревизия.")
+                return
+            print(f"Доступна подписанная версия {offered.version}, Git {offered.revision}.")
+            if expected is None and input("Установить? [д/Н]: ").strip().lower() not in {"д", "да", "y", "yes"}:
+                return
+            download_asset(ASSET, work / ASSET, MAX_ARCHIVE)
+            verified = work / "verified"
+            verified.mkdir(mode=0o700)
+            release = verify_bundle(work / ASSET, work / MANIFEST, work / SIGNATURE, verified, TRUST, extract=True)
+            if release != offered:
+                raise DeploymentError("Манифест изменился между проверками.")
+            install_host()
+            deploy(verified, release, start_service=configured())
+        except ReleaseError as error:
+            raise DeploymentError(str(error)) from None
         print(f"Установлено: {release_label(APP_DIR)}")
-        revision = remote_revision()
-        if expected is not None and revision != expected:
-            raise DeploymentError("Ревизия изменилась после подтверждения. Проверь обновление ещё раз.")
-        if revision == revision_at(APP_DIR):
-            print("Установлена актуальная ревизия. Служба продолжает работать в прежнем режиме.")
-            return
-        print(f"Доступна ревизия main: {revision[:12]}")
-        if expected is None and input("Установить обновление? [д/Н]: ").strip().lower() not in {"д", "да", "y", "yes"}:
-            print("Отменено.")
-            return
-        with tempfile.TemporaryDirectory(prefix="numberbot-") as temp:
-            print("Получение исходников по HTTPS.")
-            source = fetch_source(Path(temp), revision)
-            start_service = configured()
-            deploy(source, revision, start_service=start_service)
-        print(f"Установлено: {release_label(APP_DIR)}")
-        if start_service:
-            print("Служба запущена, Telegram подтвердил начало опроса.")
-        else:
-            print("Задай токен и запусти службу через sudo numberbot.")
 
 
-def install(source: Path) -> None:
-    revision = revision_at(source)
-    if revision is None and (source / ".git").exists():
-        revision = checked(
-            ["git", "-c", f"safe.directory={source}", "-C", source, "rev-parse", "HEAD"],
-            output=True,
-        )
-    with maintenance_lock():
-        deploy(source, revision, start_service=service_active(), install=True)
+def install(archive, manifest, signature):
+    safe_file(TRUST, directory=True)
+    with tempfile.TemporaryDirectory(prefix="cugam-install-", dir=TRUST) as temp:
+        work = Path(temp)
+        release = verify_bundle(archive, manifest, signature, work, TRUST, extract=True)
+        install_host()
+        with maintenance_lock():
+            installed = (APP_DIR / "VERSION").read_text().strip() if (APP_DIR / "VERSION").is_file() else None
+            check_floor(release, TRUST / "floor.json", installed)
+            deploy(work, release, start_service=service_active(), install=True)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Установка «Помощника 2 смены»")
-    parser.add_argument("source", type=Path)
+    parser = argparse.ArgumentParser(description="Установка подписанного выпуска")
+    parser.add_argument("files", type=Path, nargs=3)
     if os.geteuid() != 0:
-        raise SystemExit("Запусти sudo bash install.sh.")
+        raise SystemExit("Используй доверенный secure_release.py install.")
     try:
-        install(parser.parse_args().source)
-    except (DeploymentError, OSError, subprocess.SubprocessError) as error:
+        install(*parser.parse_args().files)
+    except (ReleaseError, DeploymentError, ValueError, OSError, subprocess.SubprocessError) as error:
         raise SystemExit(f"Ошибка установки: {error}") from None

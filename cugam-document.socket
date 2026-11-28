@@ -1,0 +1,15 @@
+[Unit]
+Description=Cugam Helper document IPC
+
+[Socket]
+ListenStream=/run/cugam-document.sock
+SocketUser=tgnumclean
+SocketGroup=tgnumclean
+SocketMode=0600
+RemoveOnStop=true
+Accept=yes
+MaxConnections=4
+Backlog=4
+
+[Install]
+WantedBy=sockets.target

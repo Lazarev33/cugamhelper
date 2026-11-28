@@ -21,6 +21,8 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from barcodes import render_png
+from admin_guard import consume, fingerprint
+from retention import sweep
 from catalog import CatalogError
 from features import GROUPS
 from infrastructure import CLIENT_FEATURES, TELEGRAM_OVERRIDES, InfraError, digest
@@ -134,6 +136,8 @@ def layout(title, content, *, identity=None, current="/", notice=None, owner=Fal
                 active = ' aria-current="page"' if current == path else ""
                 items += f'<a href="{path}"{active}>{PAGES[path]}</a>'
         items += form("/web/logout", "", "Выйти", csrf=identity.csrf, quiet=True)
+        items += form("/web/logout-all", "", "Выйти на всех устройствах", csrf=identity.csrf, quiet=True,
+                      confirmation="Завершить все веб-сессии?")
     role = ("Владелец" if owner else "Администратор") if identity else ""
     alert = f'<p class="notice" role="status">{e(MESSAGES[notice])}</p>' if notice in MESSAGES else ""
     return HTMLResponse(f'''<!doctype html>
@@ -292,6 +296,17 @@ def install(app, service, features, config):
             if not compare_digest(data.get("csrf", ""), current.csrf):
                 raise InfraError(403, "csrf")
             repo.db.execute("DELETE FROM infra_sessions WHERE id=?", (current.id,))
+        return clear_cookie(redirect("/login"), session_cookie)
+
+    @app.post("/web/logout-all", include_in_schema=False)
+    async def logout_all(request: Request):
+        data = await fields(request)
+        with service.repository() as repo, repo.transaction():
+            current = identify(request, repo)
+            if not compare_digest(data.get("csrf", ""), current.csrf):
+                raise InfraError(403, "csrf")
+            repo.db.execute("DELETE FROM infra_sessions WHERE uid=? AND scope='web'", (current.uid,))
+            repo.log(current.uid, "Завершены веб-сессии", str(current.uid))
         return clear_cookie(redirect("/login"), session_cookie)
 
     def employee_card(repo, actor, uid):
@@ -475,12 +490,21 @@ def install(app, service, features, config):
         if path == "/storage":
             root = service.path.parent
             usage = disk_usage(root)
-            return PAGES[path], metrics([("SQLite", "Доступна"), ("Размер базы", f"{service.path.stat().st_size/1024:.1f} КиБ"),
+            preview = sweep(service.path, backups=None)
+            counts = table(("Категория", "Подлежит очистке"),
+                           [(e(name), e(value)) for name, value in preview["counts"].items()])
+            return PAGES[path], card("Предварительный просмотр очистки",
+                                      "<p>Режим: " + e("утверждён" if preview["enabled"] else "без удаления") +
+                                      "</p>" + counts) + metrics([("SQLite", "Доступна"), ("Размер базы", f"{service.path.stat().st_size/1024:.1f} КиБ"),
                                          ("Свободно", f"{usage.free/1024**3:.1f} ГиБ")]) + card("Резервное копирование", "<p>Создание копий и восстановление выполняются через sudo numberbot.</p>")
         if path == "/security":
             settings = service.settings()
             rows = [(e(key), e(getattr(settings, key)), e(f"{lo}–{hi}")) for key, (lo, hi) in LIMITS.items()]
-            return PAGES[path], card("Anti-Abuse", table(("Параметр", "Значение", "Диапазон"), rows) +
+            aggregate = app.state.metrics.snapshot()
+            installed = ROOT / "RELEASE_VERIFIED"
+            evidence = installed.read_text().strip() if installed.is_file() else "Нет квитанции установщика"
+            return PAGES[path], card("Проверка при установке", "<p>" + e(evidence) + "</p>") + card("Счётчики API с момента запуска",
+                       table(("Показатель", "Значение"), [(e(k), e(v)) for k, v in aggregate.items()])) + card("Anti-Abuse", table(("Параметр", "Значение", "Диапазон"), rows) +
                                      "<p>Ограничения меняются в панели VPS.</p>")
         if path == "/diagnostics":
             status = repo.db.execute("PRAGMA quick_check(1)").fetchone()[0] if params.get("check") == "sqlite" else None
@@ -564,6 +588,20 @@ def install(app, service, features, config):
                 if not compare_digest(data.get("csrf", ""), actor.csrf):
                     raise InfraError(403, "csrf")
                 action = data.get("action", "")
+                high_risk = "role" if resource == "admin" else resource if resource == "features" else (
+                    "devices" if resource == "device" and not data.get("id") else None)
+                if high_risk:
+                    if actor.uid != repo.owner:
+                        raise InfraError(403, "owner_required")
+                    mark = fingerprint([actor.id, {key: value for key, value in data.items() if key != "csrf"}])
+                    if not consume(repo.db, actor.uid, high_risk, mark):
+                        prompt = "<p>Подтверди указанное действие с VPS. Срок — три минуты.</p><p><code>" + e(
+                            f"sudo numberbot approve {high_risk} {mark}") + "</code></p>"
+                        repeat = form(request.url.path,
+                                      "".join(hidden(key, value) for key, value in data.items() if key != "csrf"),
+                                      "Выполнить подтверждённое действие", csrf=actor.csrf)
+                        return layout("Подтверждение с VPS", card("Критическое действие", prompt + repeat),
+                                      identity=actor, current=target, owner=True)
                 if resource == "employee":
                     uid = integer(data.get("uid"))
                     if action not in {"give", "name", "note", "disable", "restore"}:

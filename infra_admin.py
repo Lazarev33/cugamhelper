@@ -1,13 +1,14 @@
 """Одноразовый административный код, доступный с локальной консоли."""
 
 import os
+import pwd
 import sys
 
 from infrastructure import Infrastructure, InfraError
 
 
 def main():
-    if os.geteuid() != 0 or not sys.stdout.isatty():
+    if pwd.getpwuid(os.geteuid()).pw_name != "tgnumclean" or not sys.stdout.isatty():
         print("Для получения кода открой интерактивный терминал VPS.")
         return 1
     try:

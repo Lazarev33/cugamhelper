@@ -56,10 +56,11 @@ class Export:
 
 
 class Exports:
-    def __init__(self, authorize, transport, clock=monotonic):
+    def __init__(self, authorize, transport, clock=monotonic, metrics=None):
         self.authorize, self.transport, self.clock = authorize, transport, clock
         self.records, self.pending, self.after = {}, deque(), OrderedDict()
         self.event = asyncio.Event()
+        self.metrics = metrics
 
     def submit(self, identity, key, parts):
         now = self.clock()
@@ -107,8 +108,9 @@ class Exports:
                     self.finish(record, "cancelled")
         self.pending = deque(key for key in self.pending if not self.records[key].finished)
 
-    @staticmethod
-    def finish(record, status):
+    def finish(self, record, status):
+        if self.metrics and not record.finished:
+            self.metrics.add("delivery_" + status)
         record.parts.clear()
         record.finished = True
         record.status = status
@@ -138,6 +140,8 @@ class Exports:
                     break
                 record.parts.pop(0)
                 record.confirmed += 1
+                if self.metrics:
+                    self.metrics.add("delivery_confirmed")
             else:
                 status = "delivered"
         finally:

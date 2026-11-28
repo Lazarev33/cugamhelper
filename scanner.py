@@ -90,6 +90,15 @@ class BoundedImage(BytesIO):
 async def scan_local(data: bytes) -> list[Decoded]:
     if len(data) > MAX_BYTES:
         raise ScanError("Изображение больше 5 МиБ.")
+    if os.getenv("CUGAM_WORKER_SOCKET"):
+        from isolated_worker import exchange
+        try:
+            result = await exchange(b"I", data, SCAN_SECONDS, MAX_RESULT_BYTES)
+            if "error" in result:
+                raise ScanError(result["error"])
+            return [Decoded(**code) for code in result["codes"]]
+        except (ValueError, KeyError, TypeError, asyncio.TimeoutError):
+            raise ScanError("Не удалось обработать изображение в изолированном процессе.") from None
     worker = await asyncio.create_subprocess_exec(
         sys.executable, str(Path(__file__).resolve()),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,

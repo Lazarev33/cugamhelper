@@ -21,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from infrastructure import Infrastructure, IntegrationFeatures, InfraError, SOCKET, revision
 from private_process import disable_core_dumps
+from safe_metrics import Metrics
 from telegram_bridge import Exports, MAX_BODY, dispatch, permitted, split_lines
 
 ROOT = Path(__file__).resolve().parent
@@ -253,8 +254,8 @@ class Limits:
 
 
 class Boundary:
-    def __init__(self, app, settings):
-        self.app, self.settings, self.limits = app, settings, Limits()
+    def __init__(self, app, settings, metrics):
+        self.app, self.settings, self.limits, self.metrics = app, settings, Limits(), metrics
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -263,6 +264,14 @@ class Boundary:
 
         async def respond(message):
             if message["type"] == "http.response.start":
+                self.metrics.add("http")
+                status = message["status"]
+                if status in {401, 403}:
+                    self.metrics.add("http_denied")
+                if status == 429:
+                    self.metrics.add("throttled")
+                if status >= 500:
+                    self.metrics.add("http_error")
                 headers = message.setdefault("headers", [])
                 headers.extend([
                     (b"cache-control", b"no-store"), (b"x-content-type-options", b"nosniff"),
@@ -343,7 +352,8 @@ def create_app(service=None, *, config=None, transport=None):
     async def send(session, text):
         return await dispatch(SOCKET, session, text)
 
-    exports = Exports(lambda sid: permitted(service, sid, features), transport or send)
+    metrics = Metrics()
+    exports = Exports(lambda sid: permitted(service, sid, features), transport or send, metrics=metrics)
 
     @asynccontextmanager
     async def lifespan(_):
@@ -361,12 +371,13 @@ def create_app(service=None, *, config=None, transport=None):
     app = FastAPI(title="Cugam Helper", version="1.0", docs_url=None, redoc_url=None,
                   openapi_url=API + "/openapi.json", lifespan=lifespan,
                   responses={400: {"model": Error}, 401: {"model": Error}, 403: {"model": Error},
-                             404: {"model": Error}, 409: {"model": Error}, 413: {"model": Error},
-                             415: {"model": Error}, 422: {"model": Error}, 429: {"model": Error},
+                             404: {"model": Error}, 409: {"model": Error}, 413: {"model": Error, "description": "Request Entity Too Large"},
+                             415: {"model": Error}, 422: {"model": Error, "description": "Unprocessable Entity"}, 429: {"model": Error},
                              503: {"model": Error}})
     app.state.exports = exports
+    app.state.metrics = metrics
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[config.host, "127.0.0.1"] if config.local else [config.host])
-    app.add_middleware(Boundary, settings=config)
+    app.add_middleware(Boundary, settings=config, metrics=metrics)
 
     @app.exception_handler(InfraError)
     async def infra_error(_, error):

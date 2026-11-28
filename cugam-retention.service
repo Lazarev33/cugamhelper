@@ -1,0 +1,16 @@
+[Unit]
+Description=Cugam Helper retention policy
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -Es /opt/tg-number-cleaner/cli.py retention-apply
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+UMask=0077
+ReadWritePaths=/etc/tg-number-cleaner -/var/lib/tg-number-cleaner -/var/backups/tg-number-cleaner
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+LimitCORE=0
+TimeoutStartSec=60

@@ -1,0 +1,372 @@
+{
+  "format": "cugam-python-components-v1",
+  "components": [
+    {
+      "name": "aiofiles",
+      "version": "25.1.0",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "declared_license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "source": "https://pypi.org/project/aiofiles/"
+    },
+    {
+      "name": "aiogram",
+      "version": "3.31.0",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/aiogram/"
+    },
+    {
+      "name": "aiohappyeyeballs",
+      "version": "2.7.1",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: Python Software Foundation License"
+      ],
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/aiohappyeyeballs/"
+    },
+    {
+      "name": "aiohttp",
+      "version": "3.14.5",
+      "scope": "all",
+      "license": "Apache-2.0 AND MIT",
+      "declared_license_files": [
+        "LICENSE.txt",
+        "vendor/llhttp/LICENSE"
+      ],
+      "source": "https://pypi.org/project/aiohttp/"
+    },
+    {
+      "name": "aiosignal",
+      "version": "1.4.0",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: Apache Software License"
+      ],
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/aiosignal/"
+    },
+    {
+      "name": "annotated-doc",
+      "version": "0.0.7",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/annotated-doc/"
+    },
+    {
+      "name": "annotated-types",
+      "version": "0.8.0",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/annotated-types/"
+    },
+    {
+      "name": "anyio",
+      "version": "4.16.0",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/anyio/"
+    },
+    {
+      "name": "attrs",
+      "version": "26.1.0",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/attrs/"
+    },
+    {
+      "name": "certifi",
+      "version": "2026.11.20",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)"
+      ],
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/certifi/"
+    },
+    {
+      "name": "click",
+      "version": "8.5.1",
+      "scope": "all",
+      "license": "BSD-3-Clause",
+      "declared_license_files": [
+        "LICENSE.txt"
+      ],
+      "source": "https://pypi.org/project/click/"
+    },
+    {
+      "name": "et-xmlfile",
+      "version": "2.0.0",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: MIT License"
+      ],
+      "declared_license_files": [],
+      "source": "https://pypi.org/project/et-xmlfile/"
+    },
+    {
+      "name": "fastapi",
+      "version": "0.141.1",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/fastapi/"
+    },
+    {
+      "name": "frozenlist",
+      "version": "1.8.0",
+      "scope": "all",
+      "license": "см. LICENSE внутри wheel",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/frozenlist/"
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: MIT License"
+      ],
+      "declared_license_files": [
+        "LICENSE.txt"
+      ],
+      "source": "https://pypi.org/project/h11/"
+    },
+    {
+      "name": "httpcore",
+      "version": "1.0.9",
+      "scope": "all",
+      "license": "BSD-3-Clause",
+      "declared_license_files": [
+        "LICENSE.md"
+      ],
+      "source": "https://pypi.org/project/httpcore/"
+    },
+    {
+      "name": "httpx",
+      "version": "0.28.1",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: BSD License"
+      ],
+      "declared_license_files": [],
+      "source": "https://pypi.org/project/httpx/"
+    },
+    {
+      "name": "idna",
+      "version": "3.20",
+      "scope": "all",
+      "license": "BSD-3-Clause",
+      "declared_license_files": [
+        "LICENSE.md"
+      ],
+      "source": "https://pypi.org/project/idna/"
+    },
+    {
+      "name": "lxml",
+      "version": "6.2.0",
+      "scope": "all",
+      "license": "см. LICENSE внутри wheel",
+      "declared_license_files": [
+        "LICENSE.txt",
+        "LICENSES.txt"
+      ],
+      "source": "https://pypi.org/project/lxml/"
+    },
+    {
+      "name": "magic-filter",
+      "version": "1.0.12",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: MIT License"
+      ],
+      "declared_license_files": [],
+      "source": "https://pypi.org/project/magic-filter/"
+    },
+    {
+      "name": "multidict",
+      "version": "7.2.1",
+      "scope": "all",
+      "license": "Apache-2.0",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/multidict/"
+    },
+    {
+      "name": "openpyxl",
+      "version": "3.1.5",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: MIT License"
+      ],
+      "declared_license_files": [],
+      "source": "https://pypi.org/project/openpyxl/"
+    },
+    {
+      "name": "pillow",
+      "version": "13.0.0",
+      "scope": "all",
+      "license": "MIT-CMU",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/pillow/"
+    },
+    {
+      "name": "propcache",
+      "version": "0.5.4",
+      "scope": "all",
+      "license": "см. LICENSE внутри wheel",
+      "declared_license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "source": "https://pypi.org/project/propcache/"
+    },
+    {
+      "name": "pydantic",
+      "version": "2.13.5",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/pydantic/"
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.46.5",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/pydantic_core/"
+    },
+    {
+      "name": "python-barcode",
+      "version": "0.16.1",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: MIT License"
+      ],
+      "declared_license_files": [
+        "LICENCE"
+      ],
+      "source": "https://pypi.org/project/python-barcode/"
+    },
+    {
+      "name": "python-docx",
+      "version": "1.2.0",
+      "scope": "all",
+      "license": [
+        "OSI Approved :: MIT License"
+      ],
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/python-docx/"
+    },
+    {
+      "name": "python-dotenv",
+      "version": "1.2.2",
+      "scope": "all",
+      "license": "см. LICENSE внутри wheel",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/python-dotenv/"
+    },
+    {
+      "name": "starlette",
+      "version": "1.10.0",
+      "scope": "all",
+      "license": "BSD-3-Clause",
+      "declared_license_files": [
+        "LICENSE.md"
+      ],
+      "source": "https://pypi.org/project/starlette/"
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.16.0",
+      "scope": "all",
+      "license": "PSF-2.0",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/typing-extensions/"
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.5",
+      "scope": "all",
+      "license": "MIT",
+      "declared_license_files": [
+        "LICENSE"
+      ],
+      "source": "https://pypi.org/project/typing-inspection/"
+    },
+    {
+      "name": "uvicorn",
+      "version": "0.52.1",
+      "scope": "all",
+      "license": "BSD-3-Clause",
+      "declared_license_files": [
+        "LICENSE.md"
+      ],
+      "source": "https://pypi.org/project/uvicorn/"
+    },
+    {
+      "name": "yarl",
+      "version": "1.25.1",
+      "scope": "all",
+      "license": "см. LICENSE внутри wheel",
+      "declared_license_files": [
+        "LICENSE",
+        "NOTICE"
+      ],
+      "source": "https://pypi.org/project/yarl/"
+    },
+    {
+      "name": "zxing-cpp",
+      "version": "3.1.1",
+      "scope": "all",
+      "license": "Apache-2.0",
+      "declared_license_files": [],
+      "source": "https://pypi.org/project/zxing-cpp/"
+    }
+  ]
+}

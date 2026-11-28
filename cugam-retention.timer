@@ -1,0 +1,10 @@
+[Unit]
+Description=Cugam Helper daily retention schedule
+
+[Timer]
+OnCalendar=daily
+Persistent=yes
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
