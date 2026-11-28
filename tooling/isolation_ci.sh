@@ -19,6 +19,9 @@ for spec in "/etc/tg-number-cleaner bot.env" "/var/lib/tg-number-cleaner catalog
     sudo chmod 0644 "$dir/$file"
 done
 sudo install -m 0644 cugam-document.socket cugam-document@.service /etc/systemd/system/
+sudo mkdir -p /etc/systemd/system/cugam-document@.service.d
+printf '[Service]\nStandardError=journal\n' | sudo tee /etc/systemd/system/cugam-document@.service.d/diagnostic.conf >/dev/null
+trap 'sudo journalctl --no-pager -n 35 -g "cugam-document|OS_ISOLATION|Traceback" || true' ERR
 sudo systemctl daemon-reload
 sudo systemctl start cugam-document.socket
 sudo -u tgnumclean python - <<'PY'

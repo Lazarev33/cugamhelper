@@ -1,6 +1,8 @@
 """Наблюдаемые отказы ОС на одноразовом GitHub runner. Только синтетические файлы."""
 from pathlib import Path
+import mmap
 import os
+import resource
 import socket
 
 assert os.geteuid() != 0, "Неверный UID worker"
@@ -31,6 +33,13 @@ except PermissionError:
     pass
 else:
     raise AssertionError("Worker повысил UID")
+assert resource.getrlimit(resource.RLIMIT_AS)[0] <= 576 * 1024**2
+try:
+    mmap.mmap(-1, 768 * 1024**2)
+except OSError as exc:
+    assert exc.errno == 12
+else:
+    raise AssertionError("RLIMIT_AS не ограничивает адресное пространство")
 with Path("/tmp/worker-synthetic").open("w") as f:
     f.write("SYNTHETIC")
 mounts = Path("/proc/self/mountinfo").read_text().splitlines()

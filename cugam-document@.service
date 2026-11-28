@@ -23,6 +23,7 @@ RestrictSUIDSGID=yes
 CapabilityBoundingSet=
 SystemCallArchitectures=native
 SystemCallFilter=~@mount socket socketpair connect bind listen accept accept4
+SystemCallErrorNumber=EPERM
 InaccessiblePaths=-/etc/tg-number-cleaner -/var/lib/tg-number-cleaner -/var/backups/tg-number-cleaner -/run/tg-number-cleaner
 TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=32M,mode=1777
 TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=32M,mode=1777

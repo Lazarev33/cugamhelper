@@ -371,8 +371,8 @@ def create_app(service=None, *, config=None, transport=None):
     app = FastAPI(title="Cugam Helper", version="1.0", docs_url=None, redoc_url=None,
                   openapi_url=API + "/openapi.json", lifespan=lifespan,
                   responses={400: {"model": Error}, 401: {"model": Error}, 403: {"model": Error},
-                             404: {"model": Error}, 409: {"model": Error}, 413: {"model": Error},
-                             415: {"model": Error}, 422: {"model": Error}, 429: {"model": Error},
+                             404: {"model": Error}, 409: {"model": Error}, 413: {"model": Error, "description": "Request Entity Too Large"},
+                             415: {"model": Error}, 422: {"model": Error, "description": "Unprocessable Entity"}, 429: {"model": Error},
                              503: {"model": Error}})
     app.state.exports = exports
     app.state.metrics = metrics
