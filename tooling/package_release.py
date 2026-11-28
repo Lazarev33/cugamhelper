@@ -33,7 +33,7 @@ def main():
         "format":1, "product":"Cugam Helper", "version":version, "revision":revision, "asset":ASSET,
         "sha256":sha256(archive.read_bytes()).hexdigest(), "size":archive.stat().st_size, "schema":2,
         "issued":issued, "expires":issued + args.days*86400, "key_id":key_id(args.public_key),
-        "python":["3.10", "3.12"], "platform":"linux-x86_64", "channel":"stable",
+        "python":["3.11", "3.12", "3.13"], "platform":"linux-x86_64", "channel":"stable",
     }
     (dest / MANIFEST).write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n")
     subprocess.run(["openssl", "pkeyutl", "-sign", "-inkey", args.private_key, "-rawin",

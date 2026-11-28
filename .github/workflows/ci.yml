@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        python: ["3.10", "3.12"]
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -19,7 +19,8 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: requirements.lock
-      - run: python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+      - run: >-
+          python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
       - run: python -m pip check
       - run: bash -n install.sh tooling/isolation_ci.sh
       - run: python -m unittest discover -v

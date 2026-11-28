@@ -6,6 +6,8 @@ import pwd
 from contextlib import contextmanager
 import fcntl
 import http.client
+import json
+import socket
 import os
 from pathlib import Path
 import re
@@ -139,8 +141,8 @@ def remote_revision():
 
 
 def install_host():
-    if sys.version_info[:2] not in {(3, 10), (3, 12)} or platform.machine() != "x86_64":
-        raise DeploymentError("Поддерживаются Linux x86_64 с системным Python 3.10 или 3.12.")
+    if sys.version_info[:2] not in {(3, 11), (3, 12), (3, 13)} or platform.machine() != "x86_64":
+        raise DeploymentError("Поддерживаются Linux x86_64 с системным Python 3.11–3.13.")
     for user in ("tgnumclean", "cugamwork", "cugambuild"):
         try:
             pwd.getpwnam(user)
@@ -264,6 +266,17 @@ def start_api_and_check():
     raise DeploymentError("API не подтвердил запуск по loopback.")
 
 
+def check_worker():
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(6)
+        connection.connect("/run/cugam-document.sock")
+        connection.sendall(b"H" + bytes((0, 0, 0, 1)) + b"1")
+        with connection.makefile("rb") as response:
+            size = int.from_bytes(response.read(4), "big")
+            if not 0 < size <= 64 or json.loads(response.read(size)) != {"status": "ok"}:
+                raise DeploymentError("Worker не подтвердил готовность по IPC.")
+
+
 def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
     worker = {}
     for name in WORKER_FILES:
@@ -323,6 +336,7 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
             if worker:
                 worker_started = True
                 systemctl("start", WORKER_SOCKET)
+                check_worker()
                 if not worker_stopped:
                     worker_enabled = True
                     systemctl("enable", WORKER_SOCKET)
@@ -341,7 +355,7 @@ def activate(candidate: Path, *, start_service: bool, install: bool) -> None:
                 enabled = True
             if legacy is not None or old_target is not None:
                 replace_link(previous, legacy / "app" if legacy else old_target)
-        except (OSError, subprocess.SubprocessError, DeploymentError) as error:
+        except (OSError, subprocess.SubprocessError, DeploymentError, ValueError) as error:
             print(f"Сбой переключения версии: {error}", file=sys.stderr)
             try:
                 if switched and (start_service or unit_changed):

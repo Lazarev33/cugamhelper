@@ -61,7 +61,7 @@ class SignedReleaseTests(TestCase):
             "format": 1, "product":"Cugam Helper", "version":version, "revision":self.digest,
             "asset":ASSET, "sha256":sha256(arc).hexdigest(), "size":len(arc), "schema":2,
             "issued":int(time.time()) - 1, "expires":int(time.time()) + expires, "key_id":self.key_id,
-            "python":["3.10", "3.12"], "platform":"linux-x86_64", "channel":"stable"}))
+            "python":["3.11", "3.12", "3.13"], "platform":"linux-x86_64", "channel":"stable"}))
         if sign:
             subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", self.key,
                             "-in", self.manifest, "-out", self.signature], check=True)

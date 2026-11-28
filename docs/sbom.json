@@ -61,18 +61,8 @@
     },
     {
       "name": "annotated-doc",
-      "version": "0.0.4",
-      "scope": "python_version == \"3.10\"",
-      "license": "MIT",
-      "declared_license_files": [
-        "LICENSE"
-      ],
-      "source": "https://pypi.org/project/annotated-doc/"
-    },
-    {
-      "name": "annotated-doc",
       "version": "0.0.7",
-      "scope": "python_version == \"3.12\"",
+      "scope": "all",
       "license": "MIT",
       "declared_license_files": [
         "LICENSE"
@@ -98,16 +88,6 @@
         "LICENSE"
       ],
       "source": "https://pypi.org/project/anyio/"
-    },
-    {
-      "name": "async-timeout",
-      "version": "5.0.1",
-      "scope": "python_version == \"3.10\"",
-      "license": [
-        "OSI Approved :: Apache Software License"
-      ],
-      "declared_license_files": [],
-      "source": "https://pypi.org/project/async-timeout/"
     },
     {
       "name": "attrs",
@@ -150,18 +130,6 @@
       ],
       "declared_license_files": [],
       "source": "https://pypi.org/project/et-xmlfile/"
-    },
-    {
-      "name": "exceptiongroup",
-      "version": "1.3.1",
-      "scope": "python_version == \"3.10\"",
-      "license": [
-        "OSI Approved :: MIT License"
-      ],
-      "declared_license_files": [
-        "LICENSE"
-      ],
-      "source": "https://pypi.org/project/exceptiongroup/"
     },
     {
       "name": "fastapi",
@@ -248,18 +216,8 @@
     },
     {
       "name": "multidict",
-      "version": "7.1.0",
-      "scope": "python_version == \"3.10\"",
-      "license": "Apache-2.0",
-      "declared_license_files": [
-        "LICENSE"
-      ],
-      "source": "https://pypi.org/project/multidict/"
-    },
-    {
-      "name": "multidict",
       "version": "7.2.1",
-      "scope": "python_version == \"3.12\"",
+      "scope": "all",
       "license": "Apache-2.0",
       "declared_license_files": [
         "LICENSE"
@@ -278,18 +236,8 @@
     },
     {
       "name": "pillow",
-      "version": "12.3.0",
-      "scope": "python_version == \"3.10\"",
-      "license": "MIT-CMU",
-      "declared_license_files": [
-        "LICENSE"
-      ],
-      "source": "https://pypi.org/project/pillow/"
-    },
-    {
-      "name": "pillow",
       "version": "13.0.0",
-      "scope": "python_version == \"3.12\"",
+      "scope": "all",
       "license": "MIT-CMU",
       "declared_license_files": [
         "LICENSE"
@@ -364,17 +312,7 @@
     {
       "name": "starlette",
       "version": "1.10.0",
-      "scope": "python_version == \"3.12\"",
-      "license": "BSD-3-Clause",
-      "declared_license_files": [
-        "LICENSE.md"
-      ],
-      "source": "https://pypi.org/project/starlette/"
-    },
-    {
-      "name": "starlette",
-      "version": "1.6.0",
-      "scope": "python_version == \"3.10\"",
+      "scope": "all",
       "license": "BSD-3-Clause",
       "declared_license_files": [
         "LICENSE.md"

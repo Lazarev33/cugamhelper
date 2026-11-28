@@ -124,7 +124,7 @@ def validate_manifest(path, signature, trust=TRUST, *, strict=True, now=None):
     now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     require(data["product"] == "Cugam Helper" and type(data["format"]) is int and data["format"] == 1 and
             data["asset"] == ASSET and type(data["schema"]) is int and data["schema"] == 2 and
-            data["channel"] == "stable" and data["python"] == ["3.10", "3.12"] and
+            data["channel"] == "stable" and data["python"] == ["3.11", "3.12", "3.13"] and
             data["platform"] == "linux-x86_64" and
             isinstance(data["revision"], str) and SHA.fullmatch(data["revision"]) and
             isinstance(data["sha256"], str) and HEX.fullmatch(data["sha256"]) and
@@ -243,6 +243,10 @@ def main():
         release = verify_bundle(*args.files, work, args.trust, strict=install, extract=install)
         print(f"Подпись Ed25519 и архив проверены. Версия {release.version}, Git {release.revision}.", flush=True)
         if install:
+            import platform
+            require(".".join(map(str, sys.version_info[:2])) in {"3.11", "3.12", "3.13"}
+                    and platform.machine() == "x86_64",
+                    "Поддерживаются Linux x86_64 и системный CPython 3.11–3.13.")
             subprocess.run(["/usr/bin/python3", "-Es", str(work / "source/deployment.py"),
                             str(work / ASSET), str(work / MANIFEST), str(work / SIGNATURE)],
                            env=CLEAN_ENV, check=True)

@@ -20,7 +20,7 @@ def package(name, version, marker):
     if not wheels:
         raise ValueError(f"{name}=={version}: отсутствуют Linux wheels")
     hashes = sorted({file["digests"]["sha256"] for file in wheels})
-    for python in ("3.10", "3.12"):
+    for python in ("3.11", "3.12", "3.13"):
         if not marker or python in marker:
             if not SpecifierSet(metadata.get("requires_python") or "").contains(Version(python)):
                 raise ValueError(f"{name}=={version}: конфликт Python {python}")
@@ -38,17 +38,10 @@ def main():
     args = parser.parse_args()
     items = [(re.sub(r"[-_.]+", "-", row["metadata"]["name"]).lower(), row["metadata"]["version"], "")
              for row in json.loads(args.report.read_text())["install"]]
-    special = {"pillow": ("12.3.0", "13.0.0"), "starlette": ("1.6.0", "1.10.0"),
-               "annotated-doc": ("0.0.4", "0.0.7"), "multidict": ("7.1.0", "7.2.1")}
-    items = [row for row in items if row[0] not in special]
-    for name, versions in special.items():
-        items.extend((name, version, f'python_version == "{python}"') for version, python in zip(versions, ("3.10", "3.12")))
-    items += [("async-timeout", "5.0.1", 'python_version == "3.10"'),
-              ("exceptiongroup", "1.3.1", 'python_version == "3.10"')]
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda row: package(*row), sorted(items)))
     Path("requirements.lock").write_text(
-        "# Точный набор wheels для Linux x86_64 / CPython 3.10 и 3.12.\n" +
+        "# Точный набор wheels для Linux x86_64 / CPython 3.11–3.13.\n" +
         "\n".join(line for line, _ in results) + "\n")
     Path("docs/sbom.json").write_text(json.dumps(
         {"format": "cugam-python-components-v1", "components": [info for _, info in results]},

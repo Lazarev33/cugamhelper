@@ -24,7 +24,7 @@ import retention
 from infra_features import common_features, feature_database, revision, write_common
 from features import DEFAULT_FEATURES, FEATURES_PATH, GROUPS, load_features, parse_features
 from deployment import (
-    APP_DIR, SERVICE, API_SERVICE, api_probe, api_settings, start_api_and_check, CONFIG_DIR, DeploymentError, maintenance_lock, service_active, update, start_and_check, remote_revision, release_label,
+    APP_DIR, SERVICE, API_SERVICE, api_probe, api_settings, start_api_and_check, check_worker, CONFIG_DIR, DeploymentError, maintenance_lock, service_active, update, start_and_check, remote_revision, release_label,
 )
 
 ENV_FILE = Path("/etc/tg-number-cleaner/bot.env")
@@ -437,15 +437,7 @@ def infra_action(action):
 
 
 def worker_status():
-    import socket
-    with socket.socket(socket.AF_UNIX) as probe:
-        probe.settimeout(5)
-        probe.connect("/run/cugam-document.sock")
-        probe.sendall(b"H" + bytes((0, 0, 0, 1)) + b"1")
-        with probe.makefile("rb") as answer:
-            size = int.from_bytes(answer.read(4), "big")
-            if not 0 < size <= 64 or json.loads(answer.read(size)) != {"status": "ok"}:
-                raise ValueError("Worker не подтвердил проверку.")
+    check_worker()
     print("Worker ответил через IPC. Проверки полномочий см. в отчёте испытаний.")
 
 
