@@ -1,0 +1,36 @@
+[Unit]
+Description=Cugam Helper isolated document worker
+CollectMode=inactive-or-failed
+
+[Service]
+User=cugamwork
+Group=cugamwork
+WorkingDirectory=/opt/tg-number-cleaner
+ExecStart=/opt/tg-number-cleaner/.venv/bin/python -EsB /opt/tg-number-cleaner/isolated_worker.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=null
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=~@mount socket socketpair connect bind listen accept accept4
+InaccessiblePaths=-/etc/tg-number-cleaner -/var/lib/tg-number-cleaner -/var/backups/tg-number-cleaner -/run/tg-number-cleaner
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=32M,mode=1777
+TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=32M,mode=1777
+LimitCORE=0
+LimitAS=576M
+LimitCPU=12
+MemoryMax=512M
+MemorySwapMax=0
+RuntimeMaxSec=32
+TasksMax=2
+UMask=0077

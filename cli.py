@@ -17,6 +17,10 @@ import sys
 import tempfile
 
 from branding import BOT_NAME
+from admin_guard import approve
+from build_release import isolated_build
+from secure_release import MANIFEST, SIGNATURE, TRUST, ReleaseError, validate_manifest
+import retention
 from infra_features import common_features, feature_database, revision, write_common
 from features import DEFAULT_FEATURES, FEATURES_PATH, GROUPS, load_features, parse_features
 from deployment import (
@@ -85,10 +89,8 @@ def logs(follow: bool = False) -> None:
 
 def run_tests() -> None:
     print("\nЗапускаю встроенные проверки без обращения к Telegram...")
-    return invoke([
-        str(APP_DIR / ".venv/bin/python"), "-m", "unittest", "discover", "-s", str(APP_DIR),
-        "-p", "test_*.py", "-v",
-    ])
+    isolated_build("cugambuild", [APP_DIR / ".venv/bin/python", "-m", "unittest", "discover",
+                                  "-s", APP_DIR, "-p", "test_*.py", "-v"])
 
 
 def update_from_github(expected=None) -> bool:
@@ -97,7 +99,7 @@ def update_from_github(expected=None) -> bool:
     except (EOFError, KeyboardInterrupt):
         print("\nОбновление отменено.")
         return False
-    except (DeploymentError, OSError, subprocess.SubprocessError) as error:
+    except (ReleaseError, DeploymentError, OSError, subprocess.SubprocessError) as error:
         print(f"Обновление не завершено. {error}", file=sys.stderr)
         return False
     return True
@@ -342,7 +344,10 @@ def dashboard():
 
 
 def diagnostics():
-    python = APP_DIR / ".venv/bin/python"
+    def libraries():
+        isolated_build("cugambuild", [APP_DIR / ".venv/bin/python", "-c",
+                      "import aiogram, barcode, PIL, zxingcpp, dotenv, openpyxl, docx, lxml"])
+        return True
     def settings_check():
         load_settings()
         read_feature_policy()
@@ -362,7 +367,7 @@ def diagnostics():
         ("SQLite (проверь запуск службы)", db_check),
         ("API на loopback (проверь службу cugam-api)", api_probe),
         ("Файлы релиза (переустанови выпуск)", lambda: all((APP_DIR / p).is_file() for p in (APP_DIR / "deploy-files.txt").read_text().splitlines())),
-        ("Python и библиотеки (переустанови выпуск)", lambda: invoke([str(python), "-c", "import sys, aiogram, barcode, PIL, zxingcpp, dotenv, openpyxl, docx, lxml; sys.exit(sys.version_info < (3,10))"])),
+        ("Python и библиотеки (переустанови выпуск)", libraries),
         ("GitHub (проверь HTTPS)", remote_revision),
         ("Telegram getMe (проверь сеть и токен)", telegram),
     ]
@@ -421,7 +426,8 @@ def infra_action(action):
 }}""")
         return True
     if action == "web-access":
-        return invoke([str(APP_DIR / ".venv/bin/python"), str(APP_DIR / "infra_admin.py")], timeout=10)
+        return invoke(["/usr/sbin/runuser", "--pty", "-u", "tgnumclean", "--",
+                       str(APP_DIR / ".venv/bin/python"), "-Es", str(APP_DIR / "infra_admin.py")], timeout=10)
     with maintenance_lock():
         if action == "api-start":
             start_api_and_check()
@@ -430,7 +436,84 @@ def infra_action(action):
         return invoke(["systemctl", "stop", API_SERVICE], timeout=20)
 
 
+def worker_status():
+    import socket
+    with socket.socket(socket.AF_UNIX) as probe:
+        probe.settimeout(5)
+        probe.connect("/run/cugam-document.sock")
+        probe.sendall(b"H" + bytes((0, 0, 0, 1)) + b"1")
+        with probe.makefile("rb") as answer:
+            size = int.from_bytes(answer.read(4), "big")
+            if not 0 < size <= 64 or json.loads(answer.read(size)) != {"status": "ok"}:
+                raise ValueError("Worker не подтвердил проверку.")
+    print("Worker ответил через IPC. Проверки полномочий см. в отчёте испытаний.")
+
+
+def storage_action(action):
+    if action == "trust-status":
+        release = validate_manifest(APP_DIR / MANIFEST, APP_DIR / SIGNATURE, TRUST)
+        if release.revision != (APP_DIR / "REVISION").read_text().strip():
+            raise ValueError("Квитанция относится к другой ревизии.")
+        print(f"Подпись манифеста действительна: {release.version}, Git {release.revision}, ключ {release.key}.")
+        return
+    if action == "worker-status":
+        return worker_status()
+    if action == "backups":
+        print(json.dumps(retention.inventory(BACKUPS, verify=True), indent=2, ensure_ascii=False))
+        return
+    with maintenance_lock():
+        result = retention.sweep(DB, CONFIG_DIR / "retention.json", BACKUPS, apply=action == "retention-apply")
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def restore_database(name):
+    from deployment import systemctl
+    import pwd
+    if Path(name).name != name or not name.startswith("каталог-") or not name.endswith(".sqlite3"):
+        raise ValueError("Укажи имя копии из sudo numberbot backups.")
+    if not sys.stdin.isatty() or input("Будут сброшены допуски и сессии. Для восстановления введи RESTORE: ") != "RESTORE":
+        print("Восстановление отменено.")
+        return
+    with maintenance_lock(), tempfile.TemporaryDirectory(dir=DB.parent) as folder:
+        pending = Path(folder) / "restored.db"
+        retention.prepare_restore(BACKUPS / name, pending)
+        bot_running = service_active()
+        api_running = api_probe()
+        saved = Path(folder) / "previous.db"
+        swapped = False
+        try:
+            systemctl("stop", SERVICE, API_SERVICE)
+            if any(Path(str(DB) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+                raise ValueError("Закрой открытые транзакции SQLite перед восстановлением.")
+            account = pwd.getpwnam("tgnumclean")
+            os.chown(pending, account.pw_uid, account.pw_gid)
+            pending.chmod(0o600)
+            if DB.exists():
+                os.link(DB, saved)
+            pending.replace(DB)
+            swapped = True
+            if api_running:
+                start_api_and_check()
+            if bot_running:
+                start_and_check()
+        except BaseException:
+            if swapped:
+                systemctl("stop", SERVICE, API_SERVICE)
+                if saved.exists():
+                    saved.replace(DB)
+                else:
+                    DB.unlink(missing_ok=True)
+            if bot_running:
+                start_and_check()
+            if api_running:
+                start_api_and_check()
+            raise
+    print("Копия восстановлена. Владелец может заново выдать допуски.")
+
+
 def dispatch(action):
+    if action in {"trust-status", "worker-status", "backups", "retention-preview", "retention-apply"}:
+        return storage_action(action)
     if action in {"api-status", "api-start", "api-stop", "web-access", "proxy"}:
         return infra_action(action)
     if action in {"start", "restart", "stop", "setup", "owner", "token", "backup"}:
@@ -476,8 +559,9 @@ def menu():
 
 def main():
     parser = argparse.ArgumentParser(description=BOT_NAME)
-    parser.add_argument("action", nargs="?", default="menu", choices="menu setup owner settings features token start stop restart status logs follow test diagnose backup update api-status api-start api-stop api-config web-access proxy".split())
+    parser.add_argument("action", nargs="?", default="menu", choices="menu setup owner settings features token start stop restart status logs follow test diagnose backup update api-status api-start api-stop api-config web-access proxy trust-status worker-status backups retention-preview retention-apply retention-policy restore approve".split())
     parser.add_argument("--expected-revision", help=argparse.SUPPRESS)
+    parser.add_argument("extra", nargs="*")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     args = parser.parse_args()
@@ -497,6 +581,35 @@ def main():
                 print(f"Панель недоступна в этом терминале. Открываю текстовое меню. {error}")
                 menu()
             return 0
+        if action in {"approve", "retention-policy", "restore"}:
+            try:
+                if action == "approve" and len(args.extra) == 2:
+                    owner = load_settings(SETTINGS_PATH).owner_telegram_id
+                    if owner is None:
+                        raise ValueError("Владелец не настроен.")
+                    with maintenance_lock():
+                        approve(DB, owner, *args.extra)
+                    print("Действие подтверждено на три минуты.")
+                elif action == "restore" and len(args.extra) == 1:
+                    restore_database(args.extra[0])
+                elif action == "retention-policy" and len(args.extra) == 1:
+                    path = Path(args.extra[0])
+                    enabled, durations = retention.settings(path)
+                    if not path.is_file() or not sys.stdin.isatty() or not confirm(
+                            "Применить сроки " + json.dumps(durations) + f", очистка {'включена' if enabled else 'выключена'}?"):
+                        return 1
+                    with maintenance_lock():
+                        atomic(CONFIG_DIR / "retention.json", json.dumps({"enabled": enabled, **durations}).encode())
+                        if enabled:
+                            invoke(["systemctl", "enable", "--now", "cugam-retention.timer"], timeout=30)
+                        else:
+                            invoke(["systemctl", "disable", "--now", "cugam-retention.timer"], timeout=30)
+                else:
+                    parser.error("Проверь аргументы команды.")
+                return 0
+            except (OSError, RuntimeError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+                print("Операция отклонена.", error, file=sys.stderr)
+                return 1
         if action == "api-config":
             try:
                 old_host, old_port = api_settings()

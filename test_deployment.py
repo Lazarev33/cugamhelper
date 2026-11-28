@@ -87,14 +87,14 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.unit.read_bytes(), b"Type=simple")
         self.assert_token_untouched()
 
-    def test_missing_deploy_key_and_unchanged_revision(self):
-        self.assertEqual(deployment.git_environment()["GIT_ALLOW_PROTOCOL"], "https")
-        self.assertTrue(deployment.REMOTE.startswith("https://github.com/"))
+    def test_signed_current_revision_preserves_existing_release(self):
+        from secure_release import Release
         installed = self.candidate("release-installed", b"unit")
         revision = "a" * 40
         (installed / "REVISION").write_text(revision, encoding="ascii")
         self.app.symlink_to(installed)
-        with patch.object(deployment, "remote_revision", return_value=revision):
+        with patch.object(deployment, "TRUST", self.config), patch.object(deployment, "safe_file"), \
+             patch.object(deployment, "available_release", return_value=Release("3.1.0", revision, "b"*64, "c"*64, 1)):
             with patch("builtins.input") as confirm, patch.object(deployment, "deploy") as deploy:
                 with redirect_stdout(StringIO()):
                     deployment.update(configured=lambda: True)

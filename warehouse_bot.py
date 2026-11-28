@@ -4,6 +4,7 @@ from base64 import b64encode,b64decode
 from contextlib import suppress
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import re
 from secrets import token_hex
@@ -75,6 +76,8 @@ def markup(mode, nonce=None, policy=DEFAULT_FEATURES):
     elif mode == "dups" and policy.permits("unique"):
         options.append(("Удалить дубликаты", "data:unique"))
     if nonce:
+        if mode in {"asc", "desc", "align", "ref"} and any(policy.input_enabled(kind) for kind in ("xlsx", "docx", "txt")):
+            options.append(("Параметры файла", f"param:{nonce}:panel"))
         options.append(("Отмена", f"flow:cancel:{nonce}"))
     if mode != "home" and policy.data:
         options.append(("Назад", "data:home"))
@@ -83,6 +86,12 @@ def markup(mode, nonce=None, policy=DEFAULT_FEATURES):
 
 
 async def worker(request,timeout):
+    if os.getenv("CUGAM_WORKER_SOCKET"):
+        from isolated_worker import exchange
+        result = await exchange(b"D", json.dumps(request).encode(), timeout)
+        if "error" in result:
+            raise ValueError(result["error"])
+        return result
     child = None
 
     async def transfer():
@@ -291,6 +300,51 @@ def register(dp, clean):
         else:
             data = await set_mode(state, mode)
             await submit(message, state, guard, uid, data, source)
+        await query.answer()
+
+    @dp.callback_query(F.data.startswith("param:"))
+    async def file_parameters(query, state, guard):
+        uid = query.from_user.id
+        data = await state.get_data()
+        fields = query.data.split(":")
+        if (len(fields) != 3 or not isinstance(query.message, Message) or guard.busy(uid)
+                or await state.get_state() != Data.input.state or data.get("nonce") != fields[1]
+                or monotonic() - data["at"] >= guard.settings.data_ttl):
+            await query.answer("Параметры устарели.")
+            return
+        mode = data["mode"]
+        nonce, action = fields[1:]
+        prefix = f"param:{nonce}:"
+        policy = guard.features
+        if not available(mode, policy):
+            await query.answer(DISABLED)
+            return
+        values = {"sheet1": ("лист", "1"), "sheet2": ("лист", "2"),
+                  "header": ("заголовок", "1"), "noheader": ("заголовок", "0"),
+                  "1251": ("кодировка", "1251"), "AB": ("столбцы", "A B"), "AC": ("столбцы", "A C")}
+        if action not in {"panel", "done", "utf"} and action not in values:
+            await query.answer()
+            return
+        opts = dict(data["opts"])
+        if action in values:
+            update_options(opts, *values[action], guard.settings.data_rows)
+        if action == "utf":
+            opts.pop("encoding", None)
+        if action == "done":
+            markup_result = markup(mode, nonce, policy)
+            title = data_title(mode, policy)
+        else:
+            markup_result = keys(*[(name, prefix + option) for name, option in (
+                ("Лист / таблица 1", "sheet1"), ("Лист / таблица 2", "sheet2"),
+                ("Столбцы A и B", "AB"), ("Столбцы A и C", "AC"), ("С заголовком", "header"),
+                ("Без заголовка", "noheader"), ("TXT UTF-8", "utf"), ("TXT Windows-1251", "1251"),
+                ("Готово", "done"))], ("Отмена", f"flow:cancel:{nonce}"))
+            heading = "первая строка — заголовок" if opts.get("header", 0) else "без заголовка"
+            title = (f"Параметры файла: лист {opts.get('sheet', 'по умолчанию')}, "
+                     f"столбцы {opts.get('a', 'A')}/{opts.get('b', 'B')}, {heading}, "
+                     f"{opts.get('encoding', 'UTF-8')}. Можно прислать файл сейчас.")
+        if guard.service(uid, lambda: edit_screen(query.message, title, markup_result)):
+            await state.update_data(opts=opts)
         await query.answer()
 
     @dp.message(StateFilter(Data.input))

@@ -1,7 +1,7 @@
 [Unit]
 Description=Помощник 2 смены (Telegram Bot)
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target cugam-document.socket
+After=network-online.target cugam-document.socket
 
 [Service]
 Type=notify
@@ -12,7 +12,7 @@ User=tgnumclean
 Group=tgnumclean
 WorkingDirectory=/opt/tg-number-cleaner
 EnvironmentFile=/etc/tg-number-cleaner/bot.env
-Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONDONTWRITEBYTECODE=1 CUGAM_WORKER_SOCKET=/run/cugam-document.sock CUGAM_REQUIRE_APPROVAL=1
 ExecStart=/opt/tg-number-cleaner/.venv/bin/python /opt/tg-number-cleaner/bot.py
 Restart=on-failure
 RestartSec=5

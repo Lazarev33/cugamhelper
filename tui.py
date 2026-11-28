@@ -610,14 +610,17 @@ class ControlPanel:
                 act("Общая проверка", "diagnose", "Настройки, systemd, SQLite, зависимости, GitHub и Telegram"),
                 act("Последние события службы", "logs"), Entry("Журнал в реальном времени", lambda: self.open("live")),
                 act("Запустить встроенные тесты", "test"),
+                act("Проверить Worker IPC", "worker-status"),
+                act("Предпросмотр хранения данных", "retention-preview"),
+                act("Инвентаризация резервных копий", "backups"),
             ], ["Сетевые проверки запускаются по запросу. Результаты появятся в правой панели или ниже."]
         if name == "live":
             return [Entry(line) for line in self.output] or [Entry("Ожидаю события журнала…")], [
                 "Последние события обновляются каждые две секунды."
             ]
-        return [Entry("Проверить обновление", self.update_check)], [
+        return [Entry("Проверить обновление", self.update_check), act("Подпись установленного манифеста", "trust-status")], [
             f"Установлено  {info.release}", f"Git-ревизия  {info.revision or '—'}",
-            "Источник  GitHub · main · HTTPS", "Будут показаны этапы подготовки, проверки и переключения релиза."
+            "Источник  GitHub Releases · Ed25519", "Будут показаны этапы подготовки, проверки и переключения релиза."
         ]
 
     def setup(self):

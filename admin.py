@@ -17,6 +17,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from barcodes import render_png, validate_value
+from admin_guard import consume, fingerprint
 from catalog import Barcode, CatalogDenied, CatalogError, DuplicateBarcode, validate_name
 from scanner import ScanError, scan_telegram
 
@@ -300,6 +301,17 @@ async def apply_flow(message, state, guard, repo, uid, action, args):
             await tell(message, "ШК удалён.", keys(("Каталог ШК", f"ad:list:{data.get('page', 0)}")))
         elif kind in {"grant", "revoke"}:
             target = data["target"]
+            if repo.owner != uid:
+                raise CatalogDenied("Изменять роли может только владелец.")
+            # Только запуск из installed unit включает независимое подтверждение для Telegram.
+            from os import getenv
+            if getenv("CUGAM_REQUIRE_APPROVAL") == "1":
+                mark = fingerprint([kind, target, data["nonce"]])
+                if not consume(repo.db, uid, "role", mark):
+                    await tell(message, f"Подтверди на VPS: sudo numberbot approve role {mark}\n"
+                               "Затем повторно нажми кнопку в течение трёх минут.",
+                               keys(("Подтвердить", f"flow:ok:{args[0]}"), await cancel_button(state)))
+                    return
             repo.set_admin(uid, target, kind == "grant")
             if kind == "revoke":
                 guard.revoke(target)
